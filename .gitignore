@@ -1,0 +1,33 @@
+# Ignore downloads folder as requested
+downloads/
+downloads/**
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Scratch / temporary directories
+scratch/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Large media files
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.aria2
+*.mp3
+*.wav
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
