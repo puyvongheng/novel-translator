@@ -17,7 +17,7 @@ from config import (
     PREVIEW_ASPECT_RATIOS,
     get_installed_khmer_fonts
 )
-from core.utils import format_timestamp
+from utils import format_timestamp
 
 class PlayerView(ctk.CTkFrame):
     """
@@ -386,7 +386,7 @@ class PlayerView(ctk.CTkFrame):
 
         # Floating Seeker Time Preview Tooltip
         self.lbl_seeker_tooltip = ctk.CTkLabel(
-            self.video_container,
+            self,
             text="⏱️ 00:00",
             font=ctk.CTkFont(family="Consolas", size=10, weight="bold"),
             fg_color="#1e293b",
@@ -1091,16 +1091,23 @@ class PlayerView(ctk.CTkFrame):
         hover_sec = ratio * self.duration_sec
         time_str = time.strftime('%H:%M:%S' if self.duration_sec >= 3600 else '%M:%S', time.gmtime(hover_sec))
         if hasattr(self, "lbl_seeker_tooltip"):
-            self.lbl_seeker_tooltip.configure(text=f"⏱️ {time_str}")
-            # Position tooltip directly above cursor in seeker bar
-            sx = self.slider_seeker.winfo_x() + event.x
-            sy = self.slider_seeker.winfo_y() - 16
-            self.lbl_seeker_tooltip.place(in_=self.slider_seeker.master, x=sx, y=sy, anchor="center")
-            self.lbl_seeker_tooltip.lift()
+            try:
+                self.lbl_seeker_tooltip.configure(text=f"⏱️ {time_str}")
+                # Position tooltip directly above cursor in seeker bar relative to PlayerView (self)
+                bar = self.slider_seeker.master
+                sx = bar.winfo_x() + self.slider_seeker.winfo_x() + event.x
+                sy = bar.winfo_y() + self.slider_seeker.winfo_y() - 16
+                self.lbl_seeker_tooltip.place(in_=self, x=sx, y=sy, anchor="center")
+                self.lbl_seeker_tooltip.lift()
+            except Exception:
+                pass
 
     def _on_seeker_leave(self, event):
         if hasattr(self, "lbl_seeker_tooltip"):
-            self.lbl_seeker_tooltip.place_forget()
+            try:
+                self.lbl_seeker_tooltip.place_forget()
+            except Exception:
+                pass
 
     def _on_screen_context_menu(self, event):
         """Right Click on Video Preview opens comprehensive Player Context Menu"""
@@ -2272,7 +2279,7 @@ class PlayerView(ctk.CTkFrame):
                 e_t = float(ent_end.get())
                 t_dur = max(0.4, e_t - s_t)
                 km_val = txt_km.get("1.0", "end-1c").strip()
-                from core.dubbing_engine import DubbingEngine
+                from services.dubbing import DubbingEngine
                 calc_rate = DubbingEngine.calculate_auto_rate(km_val, t_dur)
                 combo_rate.set(calc_rate)
                 if self.on_auto_sync_speed:

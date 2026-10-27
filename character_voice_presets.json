@@ -1,0 +1,66 @@
+{
+    "👦 កូនក្មេង (Cute Child / Youth)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "+35Hz",
+        "rate": "+15%",
+        "volume": "+0%",
+        "gender": "female",
+        "desc": "សំឡេងក្មេងស្រាល គួរឱ្យស្រលាញ់"
+    },
+    "👨 តួប្រុសកំលោះ (Natural Male Hero)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "volume": "+0%",
+        "gender": "male",
+        "desc": "សំឡេងបុរសធម្មជាតិ ច្បាស់ រលូន"
+    },
+    "👩 តួស្រីក្រមុំ (Natural Sweet Female)": {
+        "voice_name": "km-KH-SreymomNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "volume": "+0%",
+        "gender": "female",
+        "desc": "សំឡេងស្ត្រីធម្មជាតិ ផ្អែមស្រទន់"
+    },
+    "👵 តាយាយ / ព្រឹទ្ធាចារ្យ (Old Wise Master)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "-30Hz",
+        "rate": "-15%",
+        "volume": "+0%",
+        "gender": "male",
+        "desc": "សំឡេងគ្រូគុន ឬតាចាស់បុរាណ យឺត និងធ្ងន់"
+    },
+    "🎬 អ្នកអធិប្បាយរឿង (Deep Cinema Narrator)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "-15Hz",
+        "rate": "+5%",
+        "volume": "+5%",
+        "gender": "male",
+        "desc": "សំឡេងបាសធ្ងន់ អធិប្បាយរឿងភាពយន្ត"
+    },
+    "👧 ក្មេងស្រីស្រទន់ (Soft Anime Girl)": {
+        "voice_name": "km-KH-SreymomNeural",
+        "pitch": "+25Hz",
+        "rate": "+10%",
+        "volume": "+0%",
+        "gender": "female",
+        "desc": "សំឡេងតុក្កតា ក្មេងស្រី"
+    },
+    "⚡ TikTok / Shorts រហ័ស (Turbo Fast Recap)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "+5Hz",
+        "rate": "+30%",
+        "volume": "+5%",
+        "gender": "male",
+        "desc": "សំឡេងរហ័សសម្រាប់វីដេអូកាត់ខ្លី"
+    },
+    "⚙️ កំណត់តាមចិត្ត (Custom Manual Tuning)": {
+        "voice_name": "km-KH-PisethNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "volume": "+0%",
+        "gender": "male",
+        "desc": "កំណត់កម្រិត Pitch & Rate ដោយខ្លួនឯង"
+    }
+}

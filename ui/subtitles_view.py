@@ -1,8 +1,8 @@
 import math
 import tkinter as tk
 import customtkinter as ctk
-from config import TRANSLATION_PROVIDERS, WHISPER_MODELS, KHMER_FONT_FAMILY, SPEECH_SPEED_PRESETS, get_installed_khmer_fonts
-from core.utils import format_timestamp
+from config import TRANSLATION_PROVIDERS, TRANSLATION_STYLES, WHISPER_MODELS, KHMER_FONT_FAMILY, SPEECH_SPEED_PRESETS, get_installed_khmer_fonts
+from utils import format_timestamp
 
 class SubtitlesView(ctk.CTkFrame):
     """
@@ -25,7 +25,12 @@ class SubtitlesView(ctk.CTkFrame):
         on_translate_single=None,
         on_clean_noise=None,
         on_add_sub=None,
-        on_delete_sub=None
+        on_delete_sub=None,
+        on_dub_all=None,
+        on_dub_selected=None,
+        on_dub_missing=None,
+        on_voice_change=None,
+        on_voice_speed_change=None
     ):
         super().__init__(parent, fg_color="#14161b", corner_radius=0)
         self.on_select_sub = on_select_sub
@@ -38,6 +43,11 @@ class SubtitlesView(ctk.CTkFrame):
         self.on_clean_noise = on_clean_noise
         self.on_add_sub = on_add_sub
         self.on_delete_sub = on_delete_sub
+        self.on_dub_all = on_dub_all
+        self.on_dub_selected = on_dub_selected
+        self.on_dub_missing = on_dub_missing
+        self.on_voice_change = on_voice_change
+        self.on_voice_speed_change = on_voice_speed_change
 
         self.selected_idx = -1
         self.current_sub = None
@@ -53,7 +63,7 @@ class SubtitlesView(ctk.CTkFrame):
         self.active_font_size = 12
         self.txt_edit_height = 62
 
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         self._build_ui()
@@ -169,6 +179,18 @@ class SubtitlesView(ctk.CTkFrame):
         self.combo_tgt.set("Khmer (km)")
         self.combo_tgt.pack(side="left", padx=2, pady=3)
 
+        # 4.5. Translation Tone / Style Selector (Default: ធម្មតា Standard)
+        self.combo_style = ctk.CTkComboBox(
+            trans_bar,
+            values=TRANSLATION_STYLES,
+            corner_radius=2,
+            height=24,
+            width=130,
+            font=ctk.CTkFont(size=10)
+        )
+        self.combo_style.set("📖 ធម្មតា (Standard)")
+        self.combo_style.pack(side="left", padx=2, pady=3)
+
         # 5. Translate All Button
         self.btn_trans_all_main = ctk.CTkButton(
             trans_bar,
@@ -195,6 +217,116 @@ class SubtitlesView(ctk.CTkFrame):
             font=ctk.CTkFont(size=10, weight="bold")
         )
         self.btn_trans_sel_main.pack(side="right", padx=(2, 3), pady=3)
+        self._on_provider_change(self.combo_provider.get())
+
+        # Single Compact Voice / Dubbing Toolbar Row (Model, Speed, Dub All, Dub Sel, Missing, Auto-Dub)
+        dub_bar = ctk.CTkFrame(self, fg_color="#181a20", corner_radius=2, border_width=1, border_color="#262a33", height=30)
+        dub_bar.grid(row=2, column=0, padx=4, pady=(1, 2), sticky="ew")
+
+        # 1. Label icon
+        ctk.CTkLabel(dub_bar, text="🎙️ AI Voice:", font=ctk.CTkFont(size=10, weight="bold"), text_color="#10b981").pack(side="left", padx=(4, 2))
+
+        # 2. Voice Model selector
+        VOICE_MODEL_OPTIONS = [
+            "Piseth (Male / ប្រុសធម្មជាតិ)",
+            "Sreymom (Female / ស្រីធម្មជាតិ)",
+            "Piseth - រឿងនិទាន & ភាពយន្ត (Narrator)",
+            "Piseth - វីរបុរស (Action Hero)",
+            "Piseth - ព័ត៌មានផ្លូវការ (News Anchor)",
+            "Piseth - តាចាស់ / ព្រឹទ្ធាចារ្យ (Old Master)",
+            "Piseth - មនុស្សយន្ត AI (Robot Sci-Fi)",
+            "Sreymom - រឿងនិទានស្រទន់ (Soft Story)",
+            "Sreymom - ពាណិជ្ជកម្ម (Commercial)",
+            "Sreymom - ក្មេង / តុក្កតា (Anime Girl)",
+            "✨ [CLONE] Cinema Deep Baritone"
+        ]
+        self.combo_voice_model = ctk.CTkComboBox(
+            dub_bar,
+            values=VOICE_MODEL_OPTIONS,
+            command=self._on_voice_model_select,
+            corner_radius=2,
+            height=24,
+            width=165,
+            font=ctk.CTkFont(size=10)
+        )
+        self.combo_voice_model.set("Piseth (Male / ប្រុសធម្មជាតិ)")
+        self.combo_voice_model.pack(side="left", padx=2, pady=3)
+
+        # 3. Voice Speed selector
+        SPEED_OPTIONS = [
+            "1.0x (ធម្មតា)",
+            "1.1x (+10%)",
+            "1.2x (+20%)",
+            "1.3x (+30%)",
+            "Auto-Sync (ទាន់តាម CC)"
+        ]
+        self.combo_voice_speed = ctk.CTkComboBox(
+            dub_bar,
+            values=SPEED_OPTIONS,
+            command=self._on_voice_speed_select,
+            corner_radius=2,
+            height=24,
+            width=100,
+            font=ctk.CTkFont(size=10)
+        )
+        self.combo_voice_speed.set("1.1x (+10%)")
+        self.combo_voice_speed.pack(side="left", padx=2, pady=3)
+
+        # 4. Auto-Dub Checkbox
+        self.check_auto_dub = ctk.CTkCheckBox(
+            dub_bar,
+            text="Auto-Dub",
+            corner_radius=2,
+            font=ctk.CTkFont(size=9),
+            text_color="#94a3b8",
+            width=68,
+            height=18,
+            checkbox_width=13,
+            checkbox_height=13
+        )
+        self.check_auto_dub.select()
+        self.check_auto_dub.pack(side="left", padx=(2, 4), pady=3)
+
+        # 5. Dub All Button
+        self.btn_dub_all = ctk.CTkButton(
+            dub_bar,
+            text="🎧 Dub All (សំឡេងទាំងអស់)",
+            command=self._dub_all,
+            fg_color="#10b981",
+            hover_color="#059669",
+            height=24,
+            corner_radius=2,
+            font=ctk.CTkFont(size=10, weight="bold")
+        )
+        self.btn_dub_all.pack(side="left", fill="x", expand=True, padx=2, pady=3)
+
+        # 6. Dub Selected Button
+        self.btn_dub_sel = ctk.CTkButton(
+            dub_bar,
+            text="🎯 Dub Sel",
+            command=self._dub_selected,
+            fg_color="#047857",
+            hover_color="#065f46",
+            height=24,
+            width=68,
+            corner_radius=2,
+            font=ctk.CTkFont(size=9, weight="bold")
+        )
+        self.btn_dub_sel.pack(side="left", padx=2, pady=3)
+
+        # 7. Dub Missing Only Button
+        self.btn_dub_missing = ctk.CTkButton(
+            dub_bar,
+            text="⚡ Missing",
+            command=self._dub_missing,
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+            height=24,
+            width=64,
+            corner_radius=2,
+            font=ctk.CTkFont(size=9, weight="bold")
+        )
+        self.btn_dub_missing.pack(side="right", padx=(2, 3), pady=3)
 
         # Optional API Key Entry (Only shown when custom API provider is selected)
         self.api_key_frame = ctk.CTkFrame(self, fg_color="#181a20", corner_radius=2)
@@ -218,7 +350,7 @@ class SubtitlesView(ctk.CTkFrame):
 
         # 3. Scrollable Subtitles List
         self.scroll_list = ctk.CTkScrollableFrame(self, fg_color="#0d0e12", corner_radius=0)
-        self.scroll_list.grid(row=3, column=0, padx=6, pady=(3, 1), sticky="nsew")
+        self.scroll_list.grid(row=4, column=0, padx=6, pady=(3, 1), sticky="nsew")
 
         # 3.1 Pagination Bar for Ultra-Fast Loading of large movies (1,000 - 10,000+ subtitles)
         self.pagination_frame = ctk.CTkFrame(self, fg_color="#141822", corner_radius=2, height=28)
@@ -286,7 +418,7 @@ class SubtitlesView(ctk.CTkFrame):
 
         # 4. Advanced Edit Dialogue Card (Supports Khmer Unicode, Move Timing, Speech Speed)
         self.edit_card = ctk.CTkFrame(self, fg_color="#1c1f26", corner_radius=0)
-        self.edit_card.grid(row=6, column=0, padx=6, pady=(1, 6), sticky="ew")
+        self.edit_card.grid(row=7, column=0, padx=6, pady=(1, 6), sticky="ew")
 
         # Header with line identifier & Close Button (user can hide edit panel to free space)
         hdr_edit = ctk.CTkFrame(self.edit_card, fg_color="transparent")
@@ -451,8 +583,8 @@ class SubtitlesView(ctk.CTkFrame):
 
     def show_edit_panel(self):
         """Reveals the bottom edit dialogue when user clicks Edit"""
-        self.sash_edit_resize.grid(row=4, column=0, padx=6, pady=(1, 1), sticky="ew")
-        self.edit_card.grid(row=5, column=0, padx=6, pady=(1, 6), sticky="ew")
+        self.sash_edit_resize.grid(row=6, column=0, padx=6, pady=(1, 1), sticky="ew")
+        self.edit_card.grid(row=7, column=0, padx=6, pady=(1, 6), sticky="ew")
         self._edit_panel_visible = True
 
     def hide_edit_panel(self):
@@ -505,9 +637,16 @@ class SubtitlesView(ctk.CTkFrame):
         self.entry_end.insert(0, f"{end_sec:.2f}")
 
     def _on_provider_change(self, choice):
+        is_free_mt = ("Google" in choice and "Gemini" not in choice) or "MyMemory" in choice
+        if hasattr(self, "combo_style"):
+            if is_free_mt:
+                self.combo_style.pack_forget()
+            else:
+                self.combo_style.pack(side="left", padx=2, pady=3, before=self.btn_trans_all_main)
+
         if "API" in choice:
             if hasattr(self, "api_key_frame"):
-                self.api_key_frame.grid(row=2, column=0, padx=4, pady=(0, 2), sticky="ew")
+                self.api_key_frame.grid(row=3, column=0, padx=4, pady=(0, 2), sticky="ew")
             if "Gemini" in choice:
                 from config import GEMINI_API_KEY
                 if hasattr(self, "entry_api_key") and not self.entry_api_key.get():
@@ -521,6 +660,56 @@ class SubtitlesView(ctk.CTkFrame):
             if hasattr(self, "api_key_frame"):
                 self.api_key_frame.grid_remove()
 
+    def _dub_all(self):
+        if hasattr(self, "on_dub_all") and self.on_dub_all:
+            self.on_dub_all()
+
+    def _dub_selected(self):
+        idx = self.selected_idx
+        if idx is None or idx < 0 or idx >= len(self._subtitles_data):
+            if self._subtitles_data:
+                idx = 0
+            else:
+                return
+        if hasattr(self, "on_dub_selected") and self.on_dub_selected:
+            self.on_dub_selected(idx)
+
+    def _dub_missing(self):
+        if hasattr(self, "on_dub_missing") and self.on_dub_missing:
+            self.on_dub_missing()
+
+    def _on_voice_model_select(self, choice):
+        if hasattr(self, "on_voice_change") and self.on_voice_change:
+            self.on_voice_change(choice)
+
+    def _on_voice_speed_select(self, choice):
+        if hasattr(self, "on_voice_speed_change") and self.on_voice_speed_change:
+            self.on_voice_speed_change(choice)
+
+    def get_dubbing_settings(self) -> dict:
+        speed_choice = self.combo_voice_speed.get() if hasattr(self, "combo_voice_speed") else "1.1x (+10%)"
+        rate_code = "+10%"
+        if "+0%" in speed_choice or "1.0x" in speed_choice:
+            rate_code = "+0%"
+        elif "+10%" in speed_choice or "1.1x" in speed_choice:
+            rate_code = "+10%"
+        elif "+20%" in speed_choice or "1.2x" in speed_choice:
+            rate_code = "+20%"
+        elif "+30%" in speed_choice or "1.3x" in speed_choice:
+            rate_code = "+30%"
+        elif "Auto" in speed_choice:
+            rate_code = "auto"
+
+        voice_choice = self.combo_voice_model.get() if hasattr(self, "combo_voice_model") else "Piseth (Male / ប្រុសធម្មជាតិ)"
+        auto_dub = bool(self.check_auto_dub.get()) if hasattr(self, "check_auto_dub") else True
+
+        return {
+            "voice_key": voice_choice,
+            "speed_rate": rate_code,
+            "speed_label": speed_choice,
+            "auto_dub": auto_dub
+        }
+
     def get_translation_settings(self):
         from config import GEMINI_API_KEY
         key = self.entry_api_key.get().strip() if hasattr(self, "entry_api_key") else ""
@@ -530,6 +719,7 @@ class SubtitlesView(ctk.CTkFrame):
         return {
             "provider": provider,
             "api_key": key,
+            "style": self.combo_style.get() if hasattr(self, "combo_style") else "📖 ធម្មតា (Standard)",
             "source_lang": self.combo_src.get(),
             "target_lang": self.combo_tgt.get() if hasattr(self, "combo_tgt") else "Khmer (km)"
         }
@@ -628,7 +818,7 @@ class SubtitlesView(ctk.CTkFrame):
 
         if total_subs > self.page_size:
             self.lbl_page_info.configure(text=f"Page {self.current_page + 1}/{total_pages} ({start_idx + 1}-{end_idx} of {total_subs:,})")
-            self.pagination_frame.grid(row=4, column=0, padx=6, pady=(1, 1), sticky="ew")
+            self.pagination_frame.grid(row=5, column=0, padx=6, pady=(1, 1), sticky="ew")
         else:
             self.pagination_frame.grid_forget()
 

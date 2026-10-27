@@ -18,7 +18,7 @@ from config import (
     get_installed_khmer_fonts,
     KHMER_FONT_FAMILY
 )
-from core.dubbing_engine import DubbingEngine
+from services.dubbing import DubbingEngine
 
 class QuickSpeechView(ctk.CTkFrame):
     """
@@ -30,10 +30,48 @@ class QuickSpeechView(ctk.CTkFrame):
     - Background Music (BGM) Mixing with volume ducking
     - 100% Khmer Unicode Font Support with dynamic font switcher and live text metrics
     """
-    def __init__(self, parent):
+    def __init__(self, parent, log_callback=None):
         super().__init__(parent, fg_color="#0e1014", corner_radius=0)
-        self.dubbing_engine = DubbingEngine()
+        self.log_callback = log_callback
+        self.dubbing_engine = DubbingEngine(log_callback=log_callback)
         self.is_speaking = False
+
+    def log(self, text: str):
+        """Dispatches log message to log_callback if registered, or stdout"""
+        if self.log_callback:
+            try:
+                self.log_callback(text)
+            except Exception:
+                pass
+        else:
+            print(f"[AI Voice Studio] {text}")
+
+    def _get_ai_engine_summary(self, params: dict) -> str:
+        """Constructs clear description of the AI engine and voice configuration used"""
+        engine = params.get("engine", "")
+        if "Gemini" in engine:
+            g_cfg = params.get("gemini_config", {})
+            m = g_cfg.get("model", "gemini-2.0-flash")
+            v = g_cfg.get("voice_name", "Puck")
+            emo = g_cfg.get("emotion") or "ធម្មជាតិ (Natural)"
+            return f"🤖 Google Gemini AI (Model: {m} | Voice: {v} | Emotion: {emo})"
+        elif "VoxCPM" in engine:
+            preset = getattr(self, "voxcpm_preset", "Piseth Hero")
+            v_id = params.get("voice_id", "km-KH-PisethNeural")
+            return f"🎙️ VoxCPM Voice Clone (Preset: {preset} | Base: {v_id})"
+        elif "Edge TTS" in engine:
+            voice = getattr(self, "edge_voice", params.get("voice_id"))
+            rate = params.get("rate", "+0%")
+            pitch = params.get("pitch", "+0Hz")
+            return f"🇰🇭 Edge TTS Khmer Neural (Voice: {voice} | Rate: {rate} | Pitch: {pitch})"
+        elif "F5-TTS" in engine:
+            ref = os.path.basename(self.f5_ref_path) if getattr(self, "f5_ref_path", None) else "Zero-Shot Base"
+            return f"⚡ F5-TTS / Coqui Clone (Reference: {ref})"
+        elif "ElevenLabs" in engine:
+            el_v = self.combo_eleven_voice.get() if hasattr(self, "combo_eleven_voice") else "Adam"
+            return f"💎 ElevenLabs AI Studio (Voice: {el_v})"
+        else:
+            return f"AI Engine: {engine} (Voice: {params.get('voice_id')})"
 
         # Font & UI state
         self.installed_fonts = get_installed_khmer_fonts()
@@ -1385,6 +1423,10 @@ class QuickSpeechView(ctk.CTkFrame):
                         return
 
         eng_name = params.get("engine", "AI Voice").split()[0]
+        ai_summary = self._get_ai_engine_summary(params)
+        txt_snippet = params["text"][:40].replace("\n", " ")
+        self.log(f"🎙️ [AI Voice Studio] ចាប់ផ្ដើមបង្កើតសំឡេងដោយ AI | {ai_summary} | អត្ថបទ: \"{txt_snippet}...\"")
+
         self.btn_speak.configure(state="disabled")
         self.lbl_status.configure(text=f"🎙️ [{eng_name}] Generating AI Speech...", text_color="#f59e0b")
         self.progress_bar.set(0.3)
@@ -1421,6 +1463,7 @@ class QuickSpeechView(ctk.CTkFrame):
 
                 if ok and os.path.exists(out_tmp):
                     self.current_preview_audio = out_tmp
+                    self.log(f"🎉 [AI Voice Studio] បង្កើតសំឡេងដោយ AI ជោគជ័យ! | {ai_summary} -> កំពុងចាក់សំឡេង Preview")
                     self.after(0, lambda: self.progress_bar.set(1.0))
                     self.after(0, lambda: self.btn_replay.configure(state="normal"))
                     self.after(0, lambda: self.lbl_status.configure(text=f"▶ [{eng_name}] Playing Audio...", text_color="#10b981"))
@@ -1430,9 +1473,11 @@ class QuickSpeechView(ctk.CTkFrame):
                     except Exception as e:
                         print(f"Audio playback error: {e}")
                 else:
+                    self.log(f"❌ [AI Voice Studio] បរាជ័យក្នុងការបង្កើតសំឡេងដោយ AI | {ai_summary}")
                     self.after(0, lambda: self.lbl_status.configure(text=f"❌ [{eng_name}] Failed to synthesize audio", text_color="#ef4444"))
                     self.after(0, lambda: self.progress_bar.set(0.0))
             except Exception as ex:
+                self.log(f"❌ [AI Voice Studio] កំហុស Exception: {ex}")
                 self.after(0, lambda: self.lbl_status.configure(text=f"❌ Error: {str(ex)[:35]}", text_color="#ef4444"))
             finally:
                 self.after(0, lambda: self.btn_speak.configure(state="normal"))
@@ -1467,6 +1512,10 @@ class QuickSpeechView(ctk.CTkFrame):
         if not save_path:
             return
 
+        ai_summary = self._get_ai_engine_summary(params)
+        txt_snippet = params["text"][:40].replace("\n", " ")
+        self.log(f"💾 [AI Voice Studio] ចាប់ផ្ដើម Export សំឡេងដោយ AI | {ai_summary} -> {os.path.basename(save_path)}")
+
         self.btn_export.configure(state="disabled")
         self.lbl_status.configure(text=f"💾 Exporting {os.path.basename(save_path)}...", text_color="#f59e0b")
         self.progress_bar.set(0.4)
@@ -1490,16 +1539,20 @@ class QuickSpeechView(ctk.CTkFrame):
                     gemini_config=params.get("gemini_config")
                 )
                 if ok and os.path.exists(save_path):
+                    sz_kb = os.path.getsize(save_path) / 1024.0
+                    self.log(f"🎉 [AI Voice Studio] Export ឯកសារសំឡេង AI ជោគជ័យ! | {ai_summary} -> {save_path} ({sz_kb:.1f} KB)")
                     self.after(0, lambda: self.progress_bar.set(1.0))
                     self.after(0, lambda: self.lbl_status.configure(text="🎉 Export Complete!", text_color="#10b981"))
                     self.after(0, lambda: messagebox.showinfo(
                         "ជោគជ័យ (Success)",
-                        f"បាន Export ឯកសារសំឡេងជោគជ័យ:\n{save_path}\nទំហំ: {os.path.getsize(save_path) / 1024:.1f} KB"
+                        f"បាន Export ឯកសារសំឡេងជោគជ័យ:\n{save_path}\nទំហំ: {sz_kb:.1f} KB"
                     ))
                 else:
+                    self.log(f"❌ [AI Voice Studio] បរាជ័យក្នុងការ Export ឯកសារសំឡេង AI | {ai_summary}")
                     self.after(0, lambda: self.lbl_status.configure(text="❌ Export Failed", text_color="#ef4444"))
                     self.after(0, lambda: self.progress_bar.set(0.0))
             except Exception as ex:
+                self.log(f"❌ [AI Voice Studio] កំហុស Exception ពេល Export: {ex}")
                 self.after(0, lambda: self.lbl_status.configure(text=f"❌ Error: {str(ex)[:35]}", text_color="#ef4444"))
                 self.after(0, lambda: messagebox.showerror("Export Error", str(ex)))
             finally:

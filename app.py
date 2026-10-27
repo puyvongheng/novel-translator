@@ -1,15 +1,35 @@
 import os
 import sys
 
-# Force UTF-8 encoding across Windows console and I/O
+# Safe stdout/stderr handling for windowed mode
+class _NullWriter:
+    def write(self, s): pass
+    def flush(self): pass
+
+if sys.stdout is None:
+    sys.stdout = _NullWriter()
+if sys.stderr is None:
+    sys.stderr = _NullWriter()
+
+# Force UTF-8 encoding across Windows console and I/O if available
 if sys.platform.startswith("win"):
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
+
+# Ensure application directory and _internal are in PATH so local ffmpeg/dlls are prioritized
+if getattr(sys, "frozen", False):
+    _app_dir = os.path.dirname(sys.executable)
+    _internal_dir = os.path.join(_app_dir, "_internal")
+    _mei_dir = getattr(sys, "_MEIPASS", "")
+    _paths = [_app_dir, _internal_dir, _mei_dir]
+    os.environ["PATH"] = os.pathsep.join([p for p in _paths if p and os.path.isdir(p)]) + os.pathsep + os.environ.get("PATH", "")
 
 import threading
 import time
@@ -19,29 +39,35 @@ from PIL import Image
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
+warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
 import pygame
 
 # Suppress HuggingFace / Transformers warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# Core OOP Engine Imports
-from core import (
+# Services, Models & Utilities Imports
+from utils import (
     get_video_info,
     format_timestamp,
     format_filename_timestamp,
     parse_srt_content,
     parse_srt_file,
     extract_embedded_or_companion_subtitles,
-    is_khmer_text,
+    is_khmer_text
+)
+from services import (
     TranslationService,
     SpeechRecognitionEngine,
     DubbingEngine,
     SubtitleBurner,
-    EditorModel,
     ChunkedPipeline,
     VideoChunk
 )
+from models import EditorModel
 
 # UI Component Imports
 from ui import (
@@ -88,7 +114,7 @@ class MovieStudioApp(ctk.CTk):
         # Initialize Services & Engines
         self.translation_service = TranslationService()
         self.speech_engine = SpeechRecognitionEngine(model_size="base")
-        self.dubbing_engine = DubbingEngine()
+        self.dubbing_engine = DubbingEngine(log_callback=self._append_log)
         self.editor_model = EditorModel()
 
         # State Variables
@@ -288,7 +314,12 @@ class MovieStudioApp(ctk.CTk):
             on_translate_single=self.on_translate_single_subtitle,
             on_clean_noise=self.on_clean_noise,
             on_add_sub=self.on_add_new_subtitle,
-            on_delete_sub=self.on_delete_subtitle
+            on_delete_sub=self.on_delete_subtitle,
+            on_dub_all=self.on_dub_all,
+            on_dub_selected=self.on_dub_selected,
+            on_dub_missing=self.on_dub_missing,
+            on_voice_change=self.on_subtitles_voice_change,
+            on_voice_speed_change=self.on_subtitles_speed_change
         )
         self.subtitles_view.pack(fill="both", expand=True)
 
@@ -364,7 +395,8 @@ class MovieStudioApp(ctk.CTk):
 
         self.video_downloader_view = VideoDownloaderView(
             parent=tab_downloader,
-            on_open_video_in_studio=self.on_open_downloaded_video
+            on_open_video_in_studio=self.on_open_downloaded_video,
+            log_callback=self._append_log
         )
         self.video_downloader_view.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
@@ -373,7 +405,7 @@ class MovieStudioApp(ctk.CTk):
         tab_tts.grid_columnconfigure(0, weight=1)
 
         from ui import QuickSpeechView
-        self.quick_speech_view = QuickSpeechView(parent=tab_tts)
+        self.quick_speech_view = QuickSpeechView(parent=tab_tts, log_callback=self._append_log)
         self.quick_speech_view.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
 
         # Configure Tab 4: Media Assets (Project Explorer)
@@ -503,7 +535,8 @@ class MovieStudioApp(ctk.CTk):
                     self.subtitles_data = subs
                     self.after(0, lambda: self.subtitles_view.populate_subtitles(self.subtitles_data))
                     self.after(0, lambda: self.player_view.set_subtitles(self.subtitles_data))
-                    self.update_status(f"🎉 ចាប់ CC បាន {len(subs)} បន្ទាត់ជោគជ័យ!", 1.0)
+                    self.save_subtitles_state(force_save_srt=True)
+                    self.update_status(f"🎉 ចាប់ CC បាន {len(subs)} បន្ទាត់ជោគជ័យ! (បានរក្សាទុកឯកសារ .srt ស្វ័យប្រវត្តិទៅកាន់ Folder វីដេអូរួចរាល់)", 1.0)
                 else:
                     self.update_status("⚠️ មិនបានរកឃើញសន្ទនាពីវីដេអូនេះទេ", 1.0)
             except Exception as e:
@@ -985,13 +1018,38 @@ class MovieStudioApp(ctk.CTk):
             self._update_project_explorer_info()
             self.update_status(f"បានបើកវីដេអូ: {filename} ({int(duration)}s)", 0.0)
 
-            # 9. Check ONLY if companion .srt/.vtt file exists in the folder (no embedded extraction)
+            # 9. Check companion .srt/.vtt file or saved _subtitles.json state
             found_subs = extract_embedded_or_companion_subtitles(chosen)
             if found_subs and current_session == self._video_session_id:
                 self.subtitles_data = found_subs
+
+                # Link existing voice clips from voice directory to avoid re-generating
+                v_dir = self.get_voices_directory()
+                trans_count = sum(1 for s in self.subtitles_data if is_khmer_text(s.get("translated", "")))
+                voices_linked = 0
+                if os.path.exists(v_dir):
+                    for idx, s in enumerate(self.subtitles_data):
+                        if not s.get("audio_file") or not os.path.exists(s.get("audio_file", "")):
+                            s_time = format_filename_timestamp(s.get("start", 0.0))
+                            e_time = format_filename_timestamp(s.get("end", 0.0))
+                            cand = os.path.join(v_dir, f"#{s.get('id', idx+1)}_{s_time}_to_{e_time}.mp3")
+                            if os.path.exists(cand) and os.path.getsize(cand) > 100:
+                                s["audio_file"] = cand
+                                voices_linked += 1
+                        elif s.get("audio_file") and os.path.exists(s.get("audio_file")):
+                            voices_linked += 1
+
                 self.subtitles_view.populate_subtitles(self.subtitles_data)
                 self.player_view.set_subtitles(self.subtitles_data)
-                self.update_status(f"🎉 បានផ្ទុក Subtitle ពី Folder ({len(found_subs)} បន្ទាត់)! ចុច '⚡ Translate All' ដើម្បីបកប្រែជាភាសាខ្មែរ", 0.0)
+
+                total_s = len(self.subtitles_data)
+                if trans_count > 0:
+                    self.update_status(
+                        f"🎉 បានផ្ទុក Subtitle រួចជាស្រេច (បកប្រែខ្មែរ: {trans_count}/{total_s}, សំឡេង: {voices_linked}/{total_s})! អាចបន្តការងារភ្លាមៗ", 
+                        0.0
+                    )
+                else:
+                    self.update_status(f"🎉 បានផ្ទុក Subtitle ពី Folder ({total_s} បន្ទាត់)! ចុច '⚡ Translate All' ដើម្បីបកប្រែជាភាសាខ្មែរ", 0.0)
 
     def on_import_srt(self, chosen_file: str = None):
         """Imports an external SRT / VTT / ASS subtitle file, updates timeline, and auto-translates to Khmer"""
@@ -1021,25 +1079,21 @@ class MovieStudioApp(ctk.CTk):
         self.update_status(f"🎉 បាននាំចូល Subtitle: {filename} ({len(subs)} បន្ទាត់)! ចុច '⚡ Translate All' ដើម្បីបកប្រែជាភាសាខ្មែរ", 0.0)
 
     def _auto_translate_and_dub_subtitles(self, subs: list):
-        """Translates original text to Khmer (if needed) and generates segment voices in background"""
+        """Translates original text to Khmer (resuming untranslated lines) and generates segment voices in background"""
         current_session = getattr(self, "_video_session_id", 0)
         def worker():
             settings = self.subtitles_view.get_translation_settings()
-            self.translation_service.set_provider(settings["provider"], settings["api_key"])
+            self.translation_service.set_provider(settings["provider"], settings["api_key"], style=settings.get("style", ""))
             src_code = "zh" if "Chinese" in settings["source_lang"] else ("en" if "English" in settings["source_lang"] else "auto")
 
-            needs_trans = False
-            for s in subs:
-                tr = s.get("translated", "").strip()
-                if not tr or not is_khmer_text(tr):
-                    needs_trans = True
-                    break
+            # Check which items still need translation
+            untranslated = [s for s in subs if not is_khmer_text(s.get("translated", ""))]
+            total = len(subs)
 
-            if needs_trans:
-                total = len(subs)
-                self.update_status(f"⚡ កំពុងបកប្រែ CC ({total} បន្ទាត់) ទៅជាភាសាខ្មែរ (Turbo Speed)...", 0.15)
+            if untranslated:
+                self.update_status(f"⚡ កំពុងបន្តបកប្រែ CC ({len(untranslated)}/{total} បន្ទាត់) ទៅជាភាសាខ្មែរ [Turbo Speed]...", 0.15)
                 self.translation_service.translate_subtitles_parallel(
-                    subtitles=subs,
+                    subtitles=untranslated,
                     source_lang=src_code,
                     target_lang="km",
                     batch_size=15,
@@ -1048,21 +1102,32 @@ class MovieStudioApp(ctk.CTk):
                     check_cancel=lambda: current_session != getattr(self, "_video_session_id", 0)
                 )
 
+                # Persist progress immediately so re-opening video will never lose work!
+                self.save_subtitles_state()
+
                 def _u():
                     if current_session == getattr(self, "_video_session_id", 0):
                         self.subtitles_view.populate_subtitles(self.subtitles_data)
                         self.player_view.set_subtitles(self.subtitles_data)
                 self.after(0, _u)
+            else:
+                self.update_status(f"✅ CC គ្រប់ {total} បន្ទាត់ត្រូវបានបកប្រែជាភាសាខ្មែររួចរាល់ហើយ!", 0.25)
 
             if current_session != getattr(self, "_video_session_id", 0):
                 return
 
-            # Auto-generate individual voice files for all segments!
-            self.auto_generate_all_segment_voices(subs, session_id=current_session)
+            # Check if user enabled auto-dubbing, or if they prefer to choose voice model first!
+            dub_settings = self.subtitles_view.get_dubbing_settings() if hasattr(self.subtitles_view, "get_dubbing_settings") else {"auto_dub": True}
+            if dub_settings.get("auto_dub", True):
+                self._append_log(f"🤖 [AI Pipeline] បកប្រែចប់រួចរាល់! ចាប់ផ្ដើមបង្កើតសំឡេងដោយស្វ័យប្រវត្តិ (Model: {dub_settings.get('voice_key')})...")
+                self.auto_generate_all_segment_voices(subs, force_refresh=False, session_id=current_session)
+            else:
+                self._append_log(f"✅ [Translation Done] បកប្រែគ្រប់ {total} បន្ទាត់រួចរាល់! អ្នកអាចជ្រើសរើស Voice Model/Speed រួចចុច '🎧 Dub All' ដើម្បីបង្កើតសំឡេង។")
+                self.update_status(f"🎉 បកប្រែ CC {total} បន្ទាត់រួចរាល់! សូមជ្រើសរើស Voice Model រួចចុច '🎧 Dub All'", 1.0)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _extract_preview_audio(self, video_path: str):
+    def _extract_preview_audio(self, video_path: str, force: bool = False):
         """Extracts original movie audio track into a temp preview MP3 for real-time synchronized playback"""
         current_session = getattr(self, "_video_session_id", 0)
         def worker():
@@ -1072,7 +1137,7 @@ class MovieStudioApp(ctk.CTk):
                 tmp_dir = tempfile.gettempdir()
                 out_mp3 = os.path.join(tmp_dir, f"movie_orig_audio_{v_name}.mp3")
 
-                if not os.path.exists(out_mp3) or os.path.getsize(out_mp3) < 1000:
+                if force and (not os.path.exists(out_mp3) or os.path.getsize(out_mp3) < 1000):
                     cmd = [
                         "ffmpeg", "-y", "-i", video_path,
                         "-vn", "-acodec", "libmp3lame", "-b:a", "64k", "-ar", "24000", "-ac", "1",
@@ -1333,6 +1398,10 @@ class MovieStudioApp(ctk.CTk):
             tmp_audio = os.path.join(voice_dir, f"#{sub_id}_runtime.mp3")
             rate = sub.get("rate", "+0%")
             target_dur = max(0.4, sub.get("end", 0.0) - sub.get("start", 0.0))
+            self._append_log(
+                f"🤖 [AI Voice] បង្កើតសំឡេងតាមតម្រូវការដោយ AI | Engine: Edge TTS Neural ({self.dubbing_engine.voice_name}) | "
+                f"Voice: {voice_choice} | Rate: {rate} សម្រាប់ CC #{sub_id} ({target_dur:.2f}s)"
+            )
             ok = self.dubbing_engine.synthesize_line(text, tmp_audio, rate=rate, target_dur=target_dur)
 
             if ok and os.path.exists(tmp_audio):
@@ -1341,6 +1410,7 @@ class MovieStudioApp(ctk.CTk):
                     sound = pygame.mixer.Sound(tmp_audio)
                     self._cached_sounds[sub_id] = sound
                     sound.set_volume(dub_vol)
+                    self._append_log(f"✅ [AI Voice] បង្កើតសំឡេង AI On-Demand ជោគជ័យ សម្រាប់ CC #{sub_id}")
                     if self.is_playing:
                         ch = pygame.mixer.find_channel(True)
                         if ch:
@@ -1476,6 +1546,7 @@ class MovieStudioApp(ctk.CTk):
             
             # Re-synthesize voice file for this edited segment with chosen speed rate
             self._re_synthesize_single_sub(sub)
+            self.save_subtitles_state()
             messagebox.showinfo("ជោគជ័យ", "បានកែសម្រួលអត្ថបទ នាទីនិយាយ និងល្បឿនជោគជ័យ!")
         else:
             messagebox.showwarning("ជ្រើសរើសបន្ទាត់", "សូមចុចលើប៊ូតុង Jump នៃបន្ទាត់ណាមួយជាមុនសិន!")
@@ -1492,7 +1563,7 @@ class MovieStudioApp(ctk.CTk):
         if not orig:
             return
         settings = self.subtitles_view.get_translation_settings()
-        self.translation_service.set_provider(settings["provider"], settings["api_key"])
+        self.translation_service.set_provider(settings["provider"], settings["api_key"], style=settings.get("style", ""))
         src = "zh" if "Chinese" in settings["source_lang"] else ("en" if "English" in settings["source_lang"] else "auto")
         tgt = "km" if "Khmer" in settings.get("target_lang", "Khmer") else ("en" if "English" in settings.get("target_lang", "") else "km")
 
@@ -1508,6 +1579,7 @@ class MovieStudioApp(ctk.CTk):
                     self.player_view.set_subtitles(self.subtitles_data)
                     self.subtitles_view.select_subtitle_by_index(idx, scroll_to_view=True)
                     self._re_synthesize_single_sub(sub)
+                    self.save_subtitles_state()
                     self.update_status(f"✅ បានបកប្រែបន្ទាត់ #{sub_id} ជោគជ័យ!", 1.0)
                 self.after(0, _done)
             except Exception as e:
@@ -1564,13 +1636,17 @@ class MovieStudioApp(ctk.CTk):
             sub["translated"] = text
             auto_rate = DubbingEngine.calculate_auto_rate(text, target_dur)
             sub["rate"] = auto_rate
-            self.update_status(f"⚡ កំពុងកែតម្រូវល្បឿននិយាយ #{sub.get('id', idx+1)} ទៅ {auto_rate} ឱ្យទាន់វីដេអូ ({target_dur:.2f}s)...", 0.1)
+            voice_choice = self.dubbing_view.combo_voice.get()
+            sub_id = sub.get('id', idx+1)
+            self._append_log(
+                f"⚡ [AI Voice] កំពុងកែតម្រូវល្បឿន និងបង្កើតសំឡេងដោយ AI | Engine: Edge TTS Neural ({voice_choice}) | "
+                f"Auto-Sync Rate: {auto_rate} ឱ្យទាន់រយៈពេលវីដេអូ {target_dur:.2f}s សម្រាប់ CC #{sub_id}"
+            )
+            self.update_status(f"⚡ [AI Voice] កំពុងកែតម្រូវសំឡេង AI #{sub_id} ({auto_rate}) ឱ្យទាន់វីដេអូ...", 0.1)
 
             def worker():
-                voice_choice = self.dubbing_view.combo_voice.get()
                 self.dubbing_engine.set_voice(voice_choice)
                 v_dir = self.get_voices_directory()
-                sub_id = sub.get("id", idx+1)
                 s_time = format_filename_timestamp(sub.get("start", 0.0))
                 e_time = format_filename_timestamp(sub.get("end", 0.0))
                 out_path = os.path.join(v_dir, f"#{sub_id}_{s_time}_to_{e_time}.mp3")
@@ -1582,6 +1658,7 @@ class MovieStudioApp(ctk.CTk):
                         self._cached_sounds[sub_id] = pygame.mixer.Sound(out_path)
                     except Exception:
                         pass
+                    self._append_log(f"✅ [AI Voice] បានបង្កើតសំឡេង AI សម្រួលល្បឿន #{sub_id} ({auto_rate}) ជោគជ័យ")
                 def _done():
                     self.subtitles_view.populate_subtitles(self.subtitles_data)
                     self.player_view.set_subtitles(self.subtitles_data)
@@ -1652,21 +1729,116 @@ class MovieStudioApp(ctk.CTk):
             self.dubbing_engine.set_voice(voice_choice)
             voice_dir = self.get_voices_directory()
             rate = sub.get("rate", "+0%")
+            sub_id = sub.get("id", "?")
+            txt = (sub.get("translated") or sub.get("text") or "")[:35]
+            self._append_log(
+                f"🤖 [AI Voice] បង្កើតសំឡេងឡើងវិញដោយ AI | Engine: Edge TTS Neural ({self.dubbing_engine.voice_name}) | "
+                f"តួសំឡេង: {voice_choice} | Rate: {rate} សម្រាប់ CC #{sub_id}: \"{txt}...\""
+            )
             self.dubbing_engine.generate_segment_files([sub], voice_dir, default_rate=rate, force_refresh=True)
             if sub.get("audio_file") and os.path.exists(sub["audio_file"]):
                 try:
                     self._cached_sounds[sub["id"]] = pygame.mixer.Sound(sub["audio_file"])
                 except Exception:
                     pass
+                self._append_log(f"✅ [AI Voice] បង្កើតសំឡេងដោយ AI ជោគជ័យ សម្រាប់ CC #{sub_id} -> {os.path.basename(sub['audio_file'])}")
         threading.Thread(target=worker, daemon=True).start()
+
+    def save_subtitles_state(self, force_save_srt: bool = False):
+        """
+        Auto-persists current subtitle translation and audio file mappings to disk:
+        1. <video_dir>/<base_name>_subtitles.json (full state with original, translated, audio_file, rate)
+        2. <video_dir>/<base_name>.km.srt (if Khmer translation exists)
+        3. <video_dir>/<base_name>.srt (auto-saved to video folder if no .srt exists or force_save_srt=True)
+        Allows 100% resumption if the app crashes, is closed, or video is re-opened.
+        """
+        if not self.video_path or not self.subtitles_data:
+            return
+        try:
+            import json
+            v_dir = os.path.dirname(os.path.abspath(self.video_path))
+            base_name = os.path.splitext(os.path.basename(self.video_path))[0]
+            json_path = os.path.join(v_dir, f"{base_name}_subtitles.json")
+
+            data_to_save = []
+            for s in self.subtitles_data:
+                data_to_save.append({
+                    "id": s.get("id"),
+                    "start": float(s.get("start", 0.0)),
+                    "end": float(s.get("end", 0.0)),
+                    "original": str(s.get("original", "")),
+                    "translated": str(s.get("translated", "")),
+                    "audio_file": s.get("audio_file") if s.get("audio_file") and os.path.exists(s.get("audio_file")) else None,
+                    "rate": s.get("rate", "+0%")
+                })
+
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+
+            default_srt_path = os.path.join(v_dir, f"{base_name}.srt")
+            km_srt_path = os.path.join(v_dir, f"{base_name}.km.srt")
+
+            # Check if any companion .srt file already exists in the video folder
+            existing_srts = []
+            try:
+                existing_srts = [
+                    f for f in os.listdir(v_dir)
+                    if f.lower().endswith(".srt") and base_name.lower() in f.lower()
+                ]
+            except Exception:
+                pass
+            has_existing_srt = len(existing_srts) > 0
+
+            has_khmer = any(is_khmer_text(s.get("translated", "")) for s in data_to_save)
+
+            def _write_srt_file(target_file_path, prefer_translated=True):
+                with open(target_file_path, "w", encoding="utf-8") as f_out:
+                    for s in data_to_save:
+                        sid = s["id"]
+                        st_str = format_timestamp(s["start"])
+                        et_str = format_timestamp(s["end"])
+                        if prefer_translated:
+                            txt = (s.get("translated") or "").strip()
+                            if not txt:
+                                txt = (s.get("original") or "").strip()
+                        else:
+                            txt = (s.get("original") or "").strip()
+                            if not txt:
+                                txt = (s.get("translated") or "").strip()
+                        f_out.write(f"{sid}\n{st_str} --> {et_str}\n{txt}\n\n")
+
+            # 1. Export Khmer SRT if translation exists
+            if has_khmer:
+                _write_srt_file(km_srt_path, prefer_translated=True)
+
+            # 2. If no .srt exists in video folder (or force_save_srt=True or <base_name>.srt doesn't exist), auto-save <base_name>.srt!
+            if not has_existing_srt or force_save_srt or not os.path.exists(default_srt_path):
+                _write_srt_file(default_srt_path, prefer_translated=has_khmer)
+
+        except Exception as ex:
+            print(f"Warning: Failed to auto-save subtitles state: {ex}")
 
     # ------------------ INDIVIDUAL VOICE SEGMENT GENERATOR ------------------
     def get_voices_directory(self) -> str:
-        """Returns the dedicated folder where individual voice files are saved"""
+        """Returns the dedicated folder where individual voice files are saved (with low disk space auto-fallback)"""
         if self.video_path:
-            v_dir = os.path.dirname(self.video_path)
+            v_dir = os.path.dirname(os.path.abspath(self.video_path))
             v_name = os.path.splitext(os.path.basename(self.video_path))[0]
             target = os.path.join(v_dir, f"{v_name}_khmer_voices")
+
+            has_existing_clips = os.path.exists(target) and any(f.endswith(".mp3") for f in os.listdir(target)) if os.path.exists(target) else False
+
+            import shutil
+            try:
+                free_space = shutil.disk_usage(v_dir).free
+            except Exception:
+                free_space = 1024 * 1024 * 1024
+
+            # If less than 400MB free and no clips in target, fallback to C: drive to avoid [Errno 28] No space left on device
+            if free_space < 400 * 1024 * 1024 and not has_existing_clips:
+                c_fallback = os.path.join(os.path.expanduser("~"), ".khmer_movie_studio", "voices_cache", f"{v_name}_khmer_voices")
+                os.makedirs(c_fallback, exist_ok=True)
+                return c_fallback
         else:
             target = os.path.abspath("khmer_voices")
         os.makedirs(target, exist_ok=True)
@@ -1683,7 +1855,7 @@ class MovieStudioApp(ctk.CTk):
     def auto_generate_all_segment_voices(self, subs: list, force_refresh: bool = False, session_id: int = None):
         """
         Generates individual voice files per subtitle segment (#1, #2... = 1 voice file each)
-        Runs automatically in background WITHOUT popping up any save file dialog!
+        Seamlessly resumes: reuses existing generated clips and only synthesizes missing ones!
         """
         if session_id is None:
             session_id = getattr(self, "_video_session_id", 0)
@@ -1695,9 +1867,9 @@ class MovieStudioApp(ctk.CTk):
             # If any subtitle line is missing Khmer translation, auto-translate first before generating voices!
             untranslated = [s for s in subs if not is_khmer_text(s.get("translated", ""))]
             if untranslated:
-                self.update_status(f"⚡ កំពុងបកប្រែជាភាសាខ្មែរជាមុនសិន ({len(untranslated)}/{len(subs)} បន្ទាត់) [Turbo Speed]...", 0.05)
+                self.update_status(f"⚡ កំពុងបន្តបកប្រែជាភាសាខ្មែរ ({len(untranslated)}/{len(subs)} បន្ទាត់)...", 0.05)
                 trans_settings = self.subtitles_view.get_translation_settings()
-                self.translation_service.set_provider(trans_settings["provider"], trans_settings["api_key"])
+                self.translation_service.set_provider(trans_settings["provider"], trans_settings["api_key"], style=trans_settings.get("style", ""))
                 src_code = "zh" if "Chinese" in trans_settings["source_lang"] else ("en" if "English" in trans_settings["source_lang"] else "auto")
                 
                 self.translation_service.translate_subtitles_parallel(
@@ -1710,6 +1882,8 @@ class MovieStudioApp(ctk.CTk):
                     check_cancel=lambda: session_id != getattr(self, "_video_session_id", 0)
                 )
 
+                self.save_subtitles_state()
+
                 if session_id != getattr(self, "_video_session_id", 0):
                     return
 
@@ -1721,13 +1895,25 @@ class MovieStudioApp(ctk.CTk):
             if session_id != getattr(self, "_video_session_id", 0):
                 return
 
-            settings = self.dubbing_view.get_dubbing_settings()
-            voice_choice = settings["voice_key"]
-            speed_rate = settings.get("speed_rate", "+10%")
+            if hasattr(self, "subtitles_view") and hasattr(self.subtitles_view, "get_dubbing_settings"):
+                settings = self.subtitles_view.get_dubbing_settings()
+                voice_choice = settings["voice_key"]
+                speed_rate = settings["speed_rate"]
+                if speed_rate == "auto":
+                    speed_rate = "+10%"
+            else:
+                settings = self.dubbing_view.get_dubbing_settings()
+                voice_choice = settings["voice_key"]
+                speed_rate = settings.get("speed_rate", "+10%")
             self.dubbing_engine.set_voice(voice_choice)
             v_dir = self.get_voices_directory()
 
-            self.update_status(f"🎙️ កំពុងបង្កើតសំឡេងខ្មែរ (ល្បឿន: {speed_rate})...", 0.35)
+            self._append_log(
+                f"🤖 [AI Voice] ចាប់ផ្ដើមបង្កើតសំឡេងដោយ AI សម្រាប់រឿងទាំងមូល | "
+                f"Engine: Microsoft Edge TTS (Khmer Neural Studio) | តួសំឡេង AI: {voice_choice} ({self.dubbing_engine.voice_name}) | "
+                f"ល្បឿន: {speed_rate} | ចំនួន: {len(subs)} បន្ទាត់"
+            )
+            self.update_status(f"🤖 [AI Voice] កំពុងបង្កើតសំឡេងដោយ AI (Edge TTS Neural: {voice_choice})...", 0.35)
             generated = self.dubbing_engine.generate_segment_files(
                 subtitles=subs,
                 voice_dir=v_dir,
@@ -1735,6 +1921,9 @@ class MovieStudioApp(ctk.CTk):
                 force_refresh=force_refresh,
                 progress_callback=self.update_status
             )
+
+            # Auto-save state with new audio files
+            self.save_subtitles_state()
 
             if session_id != getattr(self, "_video_session_id", 0):
                 return
@@ -1749,7 +1938,11 @@ class MovieStudioApp(ctk.CTk):
                     except Exception:
                         pass
 
-            self.update_status(f"🎉 បង្កើតសំឡេងខ្មែរគ្រប់បន្ទាត់រួចរាល់ ({len(generated)} files)! ថត: {os.path.basename(v_dir)}", 1.0)
+            self._append_log(
+                f"🎉 [AI Voice] បានបង្កើតសំឡេងដោយ AI ជោគជ័យគ្រប់បន្ទាត់ ({len(generated)}/{len(subs)} files)! | "
+                f"Engine: Edge TTS ({self.dubbing_engine.voice_name}) | ថតរក្សាទុក: {os.path.basename(v_dir)}"
+            )
+            self.update_status(f"🎉 សំឡេង AI គ្រប់បន្ទាត់រួចរាល់ ({len(generated)} files)! ថត: {os.path.basename(v_dir)}", 1.0)
             self.after(0, lambda: self.dubbing_view.btn_dub.configure(state="normal"))
             self.after(0, lambda: self.player_view.set_subtitles(self.subtitles_data) if session_id == getattr(self, "_video_session_id", 0) else None)
 
@@ -1780,7 +1973,7 @@ class MovieStudioApp(ctk.CTk):
         self.player_view.set_chunks_status([])
 
         settings = self.subtitles_view.get_translation_settings()
-        self.translation_service.set_provider(settings["provider"], settings["api_key"])
+        self.translation_service.set_provider(settings["provider"], settings["api_key"], style=settings.get("style", ""))
         src_code = "zh" if "Chinese" in settings["source_lang"] else ("en" if "English" in settings["source_lang"] else "auto")
         v_path = self.video_path
 
@@ -1829,7 +2022,8 @@ class MovieStudioApp(ctk.CTk):
 
                 # Automatically generate individual Khmer voice files with auto speed sync to video
                 self.update_status(f"🎉 បកប្រែបាន {len(subs)} បន្ទាត់! កំពុងបង្កើតសំឡេងខ្មែរតាមនាទីវីដេអូ...", 0.6)
-                self.auto_generate_all_segment_voices(self.subtitles_data, force_refresh=True, session_id=current_session)
+                self.save_subtitles_state(force_save_srt=True)
+                self.auto_generate_all_segment_voices(self.subtitles_data, force_refresh=False, session_id=current_session)
 
             except Exception as e:
                 if current_session == getattr(self, "_video_session_id", 0):
@@ -1894,7 +2088,7 @@ class MovieStudioApp(ctk.CTk):
         if not getattr(self, "pipeline", None):
             return
         settings = self.subtitles_view.get_translation_settings()
-        self.translation_service.set_provider(settings["provider"], settings["api_key"])
+        self.translation_service.set_provider(settings["provider"], settings["api_key"], style=settings.get("style", ""))
         src_code = "zh" if "Chinese" in settings["source_lang"] else ("en" if "English" in settings["source_lang"] else "auto")
         voice_dir = self.get_voices_directory()
         self.update_status(f"🔄 កំពុងដំណើរការ Chunk #{chunk_id+1} ឡើងវិញ...", 0.0)
@@ -1944,6 +2138,85 @@ class MovieStudioApp(ctk.CTk):
             messagebox.showwarning("គ្មាន CC", "សូមបកប្រែរឿងដើម្បីទទួលបានអត្ថបទ CC ជាមុនសិន!")
             return
         self.auto_generate_all_segment_voices(self.subtitles_data, force_refresh=True)
+
+    def on_dub_all(self):
+        """Generates/refreshes AI voices for all subtitle lines using selected model & speed"""
+        if not self.subtitles_data:
+            messagebox.showwarning("គ្មាន CC", "សូមបញ្ចូល ឬបកប្រែអត្ថបទ CC ជាមុនសិន!")
+            return
+        settings = self.subtitles_view.get_dubbing_settings()
+        voice_choice = settings["voice_key"]
+        rate = settings["speed_rate"]
+        self.dubbing_engine.set_voice(voice_choice)
+        if hasattr(self, "dubbing_view"):
+            self.dubbing_view.combo_voice.set(voice_choice)
+            if rate != "auto":
+                self.dubbing_view.combo_speed.set(settings["speed_label"])
+        self._append_log(
+            f"🎙️ [AI Voice] បានចុច '🎧 Dub All' | Model: {voice_choice} ({self.dubbing_engine.voice_name}) | "
+            f"Speed: {settings['speed_label']} | ចំនួន: {len(self.subtitles_data)} បន្ទាត់"
+        )
+        self.auto_generate_all_segment_voices(self.subtitles_data, force_refresh=True)
+
+    def on_dub_selected(self, idx: int = None):
+        """Generates AI voice for selected subtitle line using chosen model & speed"""
+        if idx is None and hasattr(self.subtitles_view, "selected_idx"):
+            idx = self.subtitles_view.selected_idx
+        if idx is None or not (0 <= idx < len(self.subtitles_data)):
+            if self.subtitles_data:
+                idx = 0
+            else:
+                return
+        sub = self.subtitles_data[idx]
+        settings = self.subtitles_view.get_dubbing_settings()
+        voice_choice = settings["voice_key"]
+        rate = settings["speed_rate"]
+        if rate == "auto":
+            target_dur = max(0.4, sub.get("end", 0.0) - sub.get("start", 0.0))
+            rate = DubbingEngine.calculate_auto_rate(sub.get("translated", ""), target_dur)
+        sub["rate"] = rate
+        self.dubbing_engine.set_voice(voice_choice)
+        if hasattr(self, "dubbing_view"):
+            self.dubbing_view.combo_voice.set(voice_choice)
+        sub_id = sub.get("id", idx + 1)
+        self._append_log(
+            f"🎯 [AI Voice] បានចុច '🎯 Dub Selected' សម្រាប់ CC #{sub_id} | "
+            f"Model: {voice_choice} ({self.dubbing_engine.voice_name}) | Rate: {rate}"
+        )
+        self._re_synthesize_single_sub(sub)
+
+    def on_dub_missing(self):
+        """Generates AI voices only for subtitle lines that lack audio files"""
+        if not self.subtitles_data:
+            messagebox.showwarning("គ្មាន CC", "សូមបញ្ចូល ឬបកប្រែអត្ថបទ CC ជាមុនសិន!")
+            return
+        missing = [s for s in self.subtitles_data if not s.get("audio_file") or not os.path.exists(s.get("audio_file"))]
+        if not missing:
+            messagebox.showinfo("រួចរាល់ហើយ", "គ្រប់បន្ទាត់ CC ទាំងអស់សុទ្ធតែមានសំឡេងរួចរាល់ហើយ (0 missing)!")
+            self._append_log("⚡ [AI Voice] គ្រប់បន្ទាត់ CC ទាំងអស់សុទ្ធតែមានសំឡេងរួចរាល់ហើយ (No missing files).")
+            return
+        settings = self.subtitles_view.get_dubbing_settings()
+        voice_choice = settings["voice_key"]
+        self.dubbing_engine.set_voice(voice_choice)
+        if hasattr(self, "dubbing_view"):
+            self.dubbing_view.combo_voice.set(voice_choice)
+        self._append_log(
+            f"⚡ [AI Voice] រកឃើញបន្ទាត់ខ្វះសំឡេង {len(missing)}/{len(self.subtitles_data)} | "
+            f"កំពុងបំពេញសំឡេងដោយ AI (Model: {voice_choice})..."
+        )
+        self.auto_generate_all_segment_voices(self.subtitles_data, force_refresh=False)
+
+    def on_subtitles_voice_change(self, choice: str):
+        self.dubbing_engine.set_voice(choice)
+        if hasattr(self, "dubbing_view"):
+            self.dubbing_view.combo_voice.set(choice)
+        self._append_log(f"🎤 [AI Voice] បានជ្រើសរើស Voice Model ថ្មី: {choice} ({self.dubbing_engine.voice_name})")
+        self.update_status(f"🎤 AI Voice Model: {choice.split()[0]}", 1.0)
+
+    def on_subtitles_speed_change(self, choice: str):
+        if hasattr(self, "dubbing_view"):
+            self.dubbing_view.combo_speed.set(choice)
+        self._append_log(f"⚡ [AI Voice] បានផ្លាស់ប្តូរល្បឿននិយាយ: {choice}")
 
     def on_export_srt(self):
         if not self.subtitles_data:
@@ -2315,7 +2588,7 @@ class MovieStudioApp(ctk.CTk):
     def on_test_gemini_api(self):
         """Verifies and tests user's Gemini API key with immediate feedback"""
         from config import GEMINI_API_KEY
-        from core.translator import TranslationService
+        from services.translation import TranslationService
         
         self.update_status("🔍 កំពុងតេស្ត Gemini API Key...", 0.5)
         def _test_bg():
@@ -2416,7 +2689,8 @@ class MovieStudioApp(ctk.CTk):
         if hasattr(self, "dubbing_view"):
             name = "Piseth (ប្រុស)" if "Piseth" in voice_code else "Sreymom (ស្រី)"
             self.dubbing_view.combo_voice.set(f"km-KH-{name}")
-            self.update_status(f"🎤 ជ្រើសរើសតួសំឡេង: {name}", 1.0)
+            self.update_status(f"🎤 ជ្រើសរើសតួសំឡេង AI: {name}", 1.0)
+            self._append_log(f"🎤 [AI Voice] បានជ្រើសរើសតួសំឡេង AI: {name} (Engine: Microsoft Edge TTS Neural - {voice_code})")
 
     def on_menu_select_font(self):
         from config import get_installed_khmer_fonts

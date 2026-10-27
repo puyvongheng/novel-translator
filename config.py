@@ -165,13 +165,12 @@ VOICE_EFFECTS = {
     "Soft Whisper (ខ្សឹបតិចៗ)": "soft_whisper"
 }
 
-# Export Quality & Bitrates
+# Export Quality & Bitrates (Fast Direct MP3 and Lossless WAV)
 AUDIO_EXPORT_QUALITIES = {
     "MP3 320 kbps (Studio Quality / ច្បាស់បំផុត)": {"ext": ".mp3", "bitrate": "320k", "acodec": "libmp3lame"},
     "MP3 192 kbps (High Quality / មធ្យម)": {"ext": ".mp3", "bitrate": "192k", "acodec": "libmp3lame"},
     "MP3 128 kbps (Compact / ស្រាល)": {"ext": ".mp3", "bitrate": "128k", "acodec": "libmp3lame"},
     "WAV 48kHz (Lossless Audio / ដើម)": {"ext": ".wav", "bitrate": None, "acodec": "pcm_s16le"},
-    "AAC 256 kbps (.m4a / Apple)": {"ext": ".m4a", "bitrate": "256k", "acodec": "aac"}
 }
 
 # Sample Khmer text presets
@@ -182,15 +181,29 @@ KHMER_SAMPLE_TEXTS = {
     "📖 រឿងនិទានកុមារ (Bedtime Story)": "កាលពីព្រេងនាយ មានកូនទន្សាយតូចមួយរស់នៅក្នុងព្រៃធំ។ វាតែងតែចូលចិត្តរត់លេង និងចែករំលែកផ្លែឈើឆ្ងាញ់ៗជាមួយមិត្តភក្តិទាំងអស់ដោយក្តីរីករាយ។"
 }
 
-# API Keys (Preset by user or environment variable)
+# API Keys — loaded from .env file
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
 
 # Translation Providers
 TRANSLATION_PROVIDERS = [
     "Google (Free / មិនអស់លុយ)",
     "Gemini / Google AI (API Key)",
     "OpenAI ChatGPT (API Key)",
+    "⚡ Groq (LLaMA Fast)",
+    "🌐 OpenRouter (Multi-Model)",
+    "🖥️ NVIDIA NIM (LLaMA GPU)",
     "MyMemory (Free / មិនអស់លុយ)"
+]
+
+# Translation Styles / Tones (Voice Dubbing Style)
+TRANSLATION_STYLES = [
+    "📖 ធម្មតា (Standard)",
+    "😂 កំប្លែង រស់រវើក (Comedy)",
+    "⚔️ រឿងបុរាណ / ក្បាច់គុន (Wuxia)",
+    "🎬 ភាពយន្តធម្មជាតិ (Natural Drama)"
 ]
 
 # Whisper Model Sizes
@@ -267,19 +280,27 @@ SPEECH_SPEED_PRESETS = {
 # Video Player Preview Aspect Ratios & Formats
 PREVIEW_ASPECT_RATIOS = {
     "Auto (Fit Original)": None,
-    "16:9 (Landscape / YouTube)": 16.0 / 9.0,
-    "9:16 (Portrait / TikTok / Reels)": 9.0 / 16.0,
-    "1:1 (Square / Instagram)": 1.0,
-    "4:3 (Classic / SD)": 4.0 / 3.0,
-    "21:9 (Ultrawide Cinema)": 21.0 / 9.0
+    "16:9 Long Video (YouTube / Movie)": 16.0 / 9.0,
+    "9:16 Short Video (TikTok / Reels / Shorts)": 9.0 / 16.0,
+    "1:1 Square (Instagram / Post)": 1.0,
+    "4:5 Portrait (Instagram Feed)": 4.0 / 5.0,
+    "21:9 Ultrawide Cinema": 21.0 / 9.0,
+    "Custom Resolution...": "custom"
 }
 
-# Export Resolutions
+# Export Resolutions (Support 16:9 Landscape Long Video, 9:16 TikTok Vertical, 1:1 Square)
 EXPORT_RESOLUTIONS = {
-    "1080p (Full HD - 1920x1080)": (1920, 1080),
-    "720p (HD - 1280x720)": (1280, 720),
-    "4K (Ultra HD - 3840x2160)": (3840, 2160),
-    "Original (តាមវីដេអូដើម)": None
+    "Original (តាមវីដេអូដើម)": None,
+    "1080p Long Video (Full HD 16:9 - 1920x1080)": (1920, 1080),
+    "720p Long Video (HD 16:9 - 1280x720)": (1280, 720),
+    "480p Fast Draft (SD 16:9 - 854x480 - សម្រាប់ Test លឿន)": (854, 480),
+    "360p Ultra Fast (Draft - 640x360 - សម្រាប់ Test លឿនបំផុត)": (640, 360),
+    "TikTok / Reels / Shorts (9:16 Vertical - 1080x1920)": (1080, 1920),
+    "TikTok / Shorts 720p (9:16 Vertical - 720x1280)": (720, 1280),
+    "TikTok Draft 480p (9:16 Vertical - 480x854 - សម្រាប់ Test)": (480, 854),
+    "Square 1:1 (Instagram - 1080x1080)": (1080, 1080),
+    "Portrait 4:5 (Instagram - 1080x1350)": (1080, 1350),
+    "4K Ultra HD (16:9 - 3840x2160)": (3840, 2160)
 }
 
 # Export Frame Rates
@@ -289,17 +310,43 @@ EXPORT_FPS = {
     "24 FPS (Cinema)": 24
 }
 
-# Export Formats
-EXPORT_FORMATS = [
-    "MP4 Video (.mp4)",
-    "WebM Video (.webm)"
-]
+# Export Formats & Codecs (H.265 CRF 26 as first choice for Data-Saving Uploads)
+EXPORT_CODECS = {
+    "MP4 + H.265 / HEVC (CRF 26) - សន្សំ Data Upload (Recommended)": {
+        "codec": "hevc",
+        "crf": "26",
+        "ext": ".mp4",
+        "desc": "សន្សំទំហំ 50% គុណភាពច្បាស់ល្អ សន្សំ Data Upload"
+    },
+    "MP4 + H.264 / AVC (CRF 22) - Standard ឆបគ្នាគ្រប់ Device": {
+        "codec": "h264",
+        "crf": "22",
+        "ext": ".mp4",
+        "desc": "ឆបគ្នា 100% លើគ្រប់ Device និង Web Browser"
+    },
+    "⚡ MP4 + H.264 Fast Test Draft (CRF 32) - Export លឿនបំផុតសម្រាប់ Test": {
+        "codec": "h264",
+        "crf": "32",
+        "ext": ".mp4",
+        "desc": "ទម្លាក់គុណភាព និងទំហំតូចបំផុត Export ក្នុងប៉ុន្មានវិនាទីសម្រាប់ Test"
+    },
+    "WebM + VP9 (CRF 24) - Web Streaming": {
+        "codec": "vp9",
+        "crf": "24",
+        "ext": ".webm",
+        "desc": "សម្រាប់ YouTube & Web Streaming"
+    }
+}
+
+EXPORT_FORMATS = list(EXPORT_CODECS.keys())
 
 # Export Quality / CRF
 EXPORT_QUALITY = {
-    "High Quality (CRF 18)": "18",
-    "Balanced (CRF 22)": "22",
-    "Compact (CRF 26)": "26"
+    "CRF 26 (សន្សំ Data Upload / គុណភាពច្បាស់ - Recommended)": "26",
+    "⚡ Fast Draft / Test (CRF 32 - ទម្លាក់គុណភាព Export លឿនសម្រាប់ Test)": "32",
+    "⚡ Ultra Fast Preview (CRF 36 - ស្រាលបំផុត លឿនបំផុតសម្រាប់ Test)": "36",
+    "CRF 22 (Balanced / កម្រិតមធ្យម)": "22",
+    "CRF 18 (Ultra High Quality / គុណភាពខ្ពស់)": "18"
 }
 
 # Watermark Positions

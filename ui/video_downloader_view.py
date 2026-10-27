@@ -15,7 +15,7 @@ try:
 except ImportError:
     yt_dlp = None
 
-from core.utils import format_timestamp
+from utils import format_timestamp
 
 
 def _get_aria2c_path():
@@ -34,6 +34,57 @@ def _get_aria2c_path():
     return None
 
 
+def strip_ansi(text: str) -> str:
+    """Removes ANSI color and formatting codes from text or error messages."""
+    if not text:
+        return ""
+    return re.sub(r'(?:\x1b\[|\033\[|\[)[0-9;]*[a-zA-Z]', '', text).strip()
+
+
+def normalize_video_url(raw_input: str) -> str:
+    """
+    Cleans, extracts and normalizes video URLs from messy user input or share text:
+    - Extracts HTTP/HTTPS URL from messy share text (e.g. Douyin / TikTok share descriptions)
+    - Normalizes Douyin modal_id URLs:
+      https://www.douyin.com/jingxuan?modal_id=7693807499467640114 -> https://www.douyin.com/video/7693807499467640114
+      https://www.douyin.com/discover?modal_id=... -> https://www.douyin.com/video/...
+      https://www.douyin.com/user/...?modal_id=... -> https://www.douyin.com/video/...
+      https://www.douyin.com/search/...?modal_id=... -> https://www.douyin.com/video/...
+    - Normalizes TikTok modal_id URLs
+    """
+    if not raw_input:
+        return ""
+    
+    text = raw_input.strip()
+    
+    # 1. Extract URL if mixed with share text or comments
+    url_match = re.search(r'https?://[^\s<>"\']+', text)
+    if url_match:
+        url = url_match.group(0)
+    else:
+        url = text
+
+    # Strip trailing punctuation
+    url = url.rstrip('),;。！？!?,，')
+
+    # 2. Douyin URL normalization
+    if "douyin.com" in url:
+        m = re.search(r'[?&]modal_id=(\d+)', url)
+        if m:
+            return f"https://www.douyin.com/video/{m.group(1)}"
+        m2 = re.search(r'modal_id[=/](\d+)', url)
+        if m2:
+            return f"https://www.douyin.com/video/{m2.group(1)}"
+
+    # 3. TikTok URL normalization
+    if "tiktok.com" in url:
+        m = re.search(r'[?&]modal_id=(\d+)', url)
+        if m:
+            return f"https://www.tiktok.com/video/{m.group(1)}"
+
+    return url
+
+
 class VideoDownloaderView(ctk.CTkScrollableFrame):
     """
     Ultra-Modern Video Downloader Studio:
@@ -44,21 +95,64 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
     - Real-time download progress, speed, ETA, and size tracking
     - 1-Click 'Download & Open in Studio' to directly load video into Cinema Monitor & Subtitle editor
     """
-    def __init__(self, parent, on_open_video_in_studio=None):
+    def __init__(self, parent, on_open_video_in_studio=None, log_callback=None):
         super().__init__(parent, fg_color="#0e1014", corner_radius=0)
         self.on_open_video_in_studio = on_open_video_in_studio
+        self.log_callback = log_callback
 
         self.current_info = None
         self.thumbnail_photo = None
         self.is_downloading = False
         self.cancel_download = False
         self.downloaded_items = []
+        self._last_log_step = -1
 
         # Default downloads folder in workspace
         self.download_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "downloads"))
         os.makedirs(self.download_dir, exist_ok=True)
 
         self._build_ui()
+        self.log("📥 Video Downloader Engine initialized. Ready for video links.")
+
+    def log(self, text: str):
+        """Outputs a timestamped message to the local Live Logs Console and dispatches to log_callback"""
+        t_str = time.strftime("%H:%M:%S")
+        msg = f"[{t_str}] {text}"
+        if hasattr(self, "txt_logs"):
+            def _append():
+                try:
+                    self.txt_logs.configure(state="normal")
+                    self.txt_logs.insert("end", f"{msg}\n")
+                    self.txt_logs.see("end")
+                    self.txt_logs.configure(state="disabled")
+                except Exception:
+                    pass
+            self.after(0, _append)
+        if self.log_callback:
+            try:
+                self.log_callback(text)
+            except Exception:
+                pass
+        else:
+            print(f"[VideoDownloader] {msg}")
+
+    def _clear_logs(self):
+        if hasattr(self, "txt_logs"):
+            self.txt_logs.configure(state="normal")
+            self.txt_logs.delete("1.0", "end")
+            self.txt_logs.configure(state="disabled")
+            self.log("Download logs console cleared.")
+
+    def _copy_logs(self):
+        if hasattr(self, "txt_logs"):
+            content = self.txt_logs.get("1.0", "end").strip()
+            if content:
+                try:
+                    self.clipboard_clear()
+                    self.clipboard_append(content)
+                    messagebox.showinfo("Copied", "Logs copied to clipboard!")
+                except Exception:
+                    pass
 
     def _build_ui(self):
         # 1. Header Banner
@@ -361,7 +455,65 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         )
         self.lbl_prog_stats.pack(anchor="w", padx=14, pady=(0, 10))
 
-        # 6. Downloaded Items History Card
+        # 6. Live Download Logs & Console Card
+        logs_card = ctk.CTkFrame(self, fg_color="#10131a", corner_radius=6, border_width=1, border_color="#20293a")
+        logs_card.pack(fill="x", padx=16, pady=6)
+
+        l_hdr = ctk.CTkFrame(logs_card, fg_color="transparent")
+        l_hdr.pack(fill="x", padx=14, pady=(8, 4))
+
+        ctk.CTkLabel(
+            l_hdr,
+            text="📋 DOWNLOAD LOGS & CONSOLE",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#10b981"
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            l_hdr,
+            text="● Live Terminal & Multi-Thread Stream",
+            font=ctk.CTkFont(size=10),
+            text_color="#64748b"
+        ).pack(side="left", padx=10)
+
+        btn_copy_logs = ctk.CTkButton(
+            l_hdr,
+            text="📋 Copy Logs",
+            width=78,
+            height=20,
+            corner_radius=2,
+            fg_color="#1e293b",
+            hover_color="#334155",
+            font=ctk.CTkFont(size=9),
+            command=self._copy_logs
+        )
+        btn_copy_logs.pack(side="right", padx=(4, 0))
+
+        btn_clear_logs = ctk.CTkButton(
+            l_hdr,
+            text="🗑️ Clear",
+            width=58,
+            height=20,
+            corner_radius=2,
+            fg_color="#1e293b",
+            hover_color="#334155",
+            font=ctk.CTkFont(size=9),
+            command=self._clear_logs
+        )
+        btn_clear_logs.pack(side="right")
+
+        self.txt_logs = ctk.CTkTextbox(
+            logs_card,
+            height=125,
+            fg_color="#07080c",
+            text_color="#cbd5e1",
+            font=ctk.CTkFont(family="Consolas", size=10),
+            corner_radius=4
+        )
+        self.txt_logs.pack(fill="x", padx=14, pady=(2, 10))
+        self.txt_logs.configure(state="disabled")
+
+        # 7. Downloaded Items History Card
         hist_card = ctk.CTkFrame(self, fg_color="#141822", corner_radius=6, border_width=1, border_color="#222b3d")
         hist_card.pack(fill="x", padx=16, pady=(6, 16))
 
@@ -455,8 +607,11 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         try:
             cb = self.clipboard_get().strip()
             if cb:
+                clean_url = normalize_video_url(cb)
                 self.entry_url.delete(0, "end")
-                self.entry_url.insert(0, cb)
+                self.entry_url.insert(0, clean_url)
+                if clean_url != cb:
+                    self.log(f"🔄 [Downloader] បានស្រង់ និងសម្រួល Link ស្វ័យប្រវត្ត: {clean_url}")
                 self.start_preview_info()
         except Exception:
             pass
@@ -487,13 +642,20 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
 
     # ------------------ ASYNC METADATA PREVIEW ------------------
     def start_preview_info(self):
-        url = self.entry_url.get().strip()
-        if not url:
+        raw_url = self.entry_url.get().strip()
+        if not raw_url:
             self.lbl_feedback.configure(text="⚠️ Please paste a valid video URL first!", text_color="#f59e0b")
             return
 
+        url = normalize_video_url(raw_url)
+        if url != raw_url:
+            self.entry_url.delete(0, "end")
+            self.entry_url.insert(0, url)
+            self.log(f"🔄 [Downloader] បានសម្រួល Link ស្វ័យប្រវត្ត: {url}")
+
         self.btn_preview.configure(state="disabled", text="⏳ Loading...")
         self.lbl_feedback.configure(text=f"🔍 Analyzing video metadata: {url[:55]}...", text_color="#38bdf8")
+        self.log(f"🔍 [Downloader] កំពុងទាញយកព័ត៌មានវីដេអូ (Analyzing URL): {url}")
 
         def worker():
             try:
@@ -553,6 +715,9 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         self.lbl_prev_duration.configure(text=f"⏱️ Duration: {dur_str}  |  👁️ {view_str}")
         self.lbl_prev_cc.configure(text=cc_str, text_color=cc_color)
         self.lbl_feedback.configure(text="✅ Video analyzed successfully! Choose quality and click Download.", text_color="#10b981")
+        self.log(f"✅ [Downloader] វិភាគជោគជ័យ: \"{title}\" | រយៈពេល: {dur_str} | អ្នកបង្កើត: {uploader}")
+        if sub_langs:
+            self.log(f"💬 [Downloader] រកឃើញ CC/Subtitles ស្រាប់: {', '.join(sub_langs[:5])}")
 
         # Load thumbnail in background
         thumb_url = info.get("thumbnail")
@@ -580,16 +745,23 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         self.btn_preview.configure(state="normal", text="👁️ Preview Info")
         short_err = clean_err.split("\n")[0][:80]
         self.lbl_feedback.configure(text=f"❌ Failed to extract video: {short_err}", text_color="#ef4444")
+        self.log(f"❌ [Downloader] បរាជ័យក្នុងការវិភាគ URL: {short_err}")
 
     # ------------------ ASYNC VIDEO DOWNLOAD ------------------
     def start_download_thread(self, auto_open: bool = False):
-        url = self.entry_url.get().strip()
-        if not url:
+        raw_url = self.entry_url.get().strip()
+        if not raw_url:
             messagebox.showwarning("URL Missing", "Please paste a video URL to download!")
             return
         if self.is_downloading:
             messagebox.showinfo("In Progress", "A download is already in progress. Please wait.")
             return
+
+        url = normalize_video_url(raw_url)
+        if url != raw_url:
+            self.entry_url.delete(0, "end")
+            self.entry_url.insert(0, url)
+            self.log(f"🔄 [Downloader] បានសម្រួល Link ស្វ័យប្រវត្ត: {url}")
 
         out_dir = self.entry_folder.get().strip() or self.download_dir
         os.makedirs(out_dir, exist_ok=True)
@@ -608,6 +780,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
 
         self._last_prog_time = time.time()
         self._last_prog_bytes = 0
+        self._last_log_step = -1
 
         self.is_downloading = True
         self.cancel_download = False
@@ -616,6 +789,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         self.btn_stop_download.configure(state="normal")
         self.lbl_prog_title.configure(text=f"⚡ Initializing Turbo Download ({threads} Threads)...", text_color="#38bdf8")
         self.prog_bar.set(0.0)
+        self.log(f"🚀 [Downloader] ចាប់ផ្ដើមទាញយកវីដេអូ | Quality: {quality} | Turbo: {threads} Threads | Folder: {out_dir}")
 
         def worker():
             try:
@@ -705,7 +879,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
                     ydl_opts.update({
                         "writesubtitles": True,
                         "writeautomaticsub": False,  # Manual subs first to avoid 429 rate limit
-                        "subtitleslangs": ["en.*", "km.*"],
+                        "subtitleslangs": ["all", "zh.*", "en.*", "km.*"],
                         "subtitlesformat": "srt/best",
                         "ignoreerrors": True,
                     })
@@ -731,6 +905,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
                                 text="⚡ Reconnecting via Native Turbo Engine...",
                                 text_color="#38bdf8"
                             ))
+                            self.log("⚡ [Downloader] Reconnecting stream via Native Turbo Engine...")
                             fallback_native = dict(ydl_opts)
                             fallback_native.pop("external_downloader", None)
                             fallback_native.pop("external_downloader_args", None)
@@ -742,6 +917,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
                     # Fallback 2: Subtitle rate limit 429
                     if info is None and attempt_with_subs and ("subtitles" in err_lower or "429" in err_lower or "timedtext" in err_lower):
                         sub_warning = "YouTube subtitle rate limit (HTTP 429) was bypassed. Video downloaded directly."
+                        self.log("⚠️ [Downloader] YouTube Subtitle 429 rate-limited! កំពុងទាញយកវីដេអូដោយផ្ទាល់...")
                         self.after(0, lambda: self.lbl_prog_title.configure(
                             text="⚠️ Subtitle rate-limited (429). Downloading video directly...",
                             text_color="#f59e0b"
@@ -822,6 +998,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         self.prog_bar.set(0.0)
         self.lbl_prog_title.configure(text="⏹️ Download Cancelled", text_color="#f59e0b")
         self.lbl_prog_stats.configure(text="The download was stopped by user.")
+        self.log("⏹️ [Downloader] ការទាញយកត្រូវបានបញ្ឈប់ដោយអ្នកប្រើប្រាស់ (Cancelled)")
         messagebox.showinfo("Download Stopped", "បានបញ្ឈប់ការទាញយក (Download Cancelled).")
 
     def _progress_hook(self, d: dict):
@@ -857,6 +1034,12 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
 
             stats_text = f"🚀 Speed: {speed_mb:.2f} MB/s | Size: {down_mb:.1f} MB / {tot_mb:.1f} MB ({int(pct*100)}%) | ETA: {eta_m:02d}:{eta_s:02d}"
 
+            # Log periodically (every 20%) to keep log clean and informative
+            step = int(pct * 100) // 20
+            if not hasattr(self, "_last_log_step") or step > self._last_log_step:
+                self._last_log_step = step
+                self.log(f"⚡ [Downloader] ទាញយកបាន: {int(pct*100)}% | ល្បឿន: {speed_mb:.2f} MB/s | {down_mb:.1f}/{tot_mb:.1f} MB | ETA: {eta_m:02d}:{eta_s:02d}")
+
             def _update():
                 self.prog_bar.set(pct)
                 self.lbl_prog_title.configure(text=f"⚡ Turbo Downloading: {int(pct*100)}% ({speed_mb:.1f} MB/s)", text_color="#38bdf8")
@@ -874,10 +1057,16 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         else:
             self.lbl_prog_stats.configure(text=f"Saved: {target_file}")
 
+        sz_mb = os.path.getsize(target_file) / (1024 * 1024) if os.path.exists(target_file) else 0.0
+        self.log(f"🎉 [Downloader] ទាញយកវីដេអូបានជោគជ័យ! -> {filename} ({sz_mb:.1f} MB)")
+        if sub_warning:
+            self.log(f"ℹ️ [Downloader] {sub_warning}")
+
         # Add to download history box
         self._add_to_history(target_file, title)
 
         if auto_open and self.on_open_video_in_studio:
+            self.log(f"🎬 [Downloader] បើកវីដេអូ {filename} ចូលក្នុង Movie Studio ស្វ័យប្រវត្តិ...")
             self.on_open_video_in_studio(target_file)
         else:
             msg = f"🎉 Downloaded successfully!\n\nFile:\n{filename}\n\nSaved to:\n{os.path.dirname(target_file)}"
@@ -890,6 +1079,7 @@ class VideoDownloaderView(ctk.CTkScrollableFrame):
         self.lbl_prog_title.configure(text="❌ Download Failed", text_color="#ef4444")
         short_err = clean_err.split("\n")[0][:90]
         self.lbl_prog_stats.configure(text=f"Error: {short_err}")
+        self.log(f"❌ [Downloader] ការទាញយកបរាជ័យ: {clean_err[:120]}")
 
         if "429" in clean_err:
             friendly_msg = (
