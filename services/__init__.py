@@ -46,5 +46,9 @@ __all__ = [
     "FunASRTranscriber",
     "SpeakerVerificationService",
     "SrtFormatter",
-    "capture_video_subtitles"
+    "capture_video_subtitles",
+    "DownloaderService"
 ]
+
+from services.downloader import DownloaderService
+

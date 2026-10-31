@@ -25,6 +25,9 @@ class TimelineEditor(QWidget):
     - Razor split (S), Mark In/Out (I/O), Ripple delete, and Batch Export
     """
     subtitles_modified = Signal()
+    video_selected = Signal(str)
+    video_clips_modified = Signal(list)
+    video_clip_selected = Signal(int, dict)
     video_dropped = Signal(str)
     subtitle_dropped = Signal(str)
     audio_dropped = Signal(str)
@@ -142,6 +145,9 @@ class TimelineEditor(QWidget):
             on_toggle_audio_mute=self.on_toggle_audio_mute
         )
         self.canvas.subtitles_modified.connect(self.subtitles_modified.emit)
+        self.canvas.video_selected.connect(self.video_selected.emit)
+        self.canvas.video_clips_modified.connect(self.video_clips_modified.emit)
+        self.canvas.video_clip_selected.connect(self.video_clip_selected.emit)
         self.canvas.video_dropped.connect(self.video_dropped.emit)
         self.canvas.subtitle_dropped.connect(self.subtitle_dropped.emit)
         self.canvas.audio_dropped.connect(self.audio_dropped.emit)
@@ -265,6 +271,10 @@ class TimelineEditor(QWidget):
 
     def set_current_time(self, t: float):
         self.canvas.set_current_time(t)
+
+    def add_main_video_clip(self, file_path: str, at_time: float = None):
+        """Adds a sequential video clip to Main Video Track (Track 1)."""
+        return self.canvas.add_main_video_clip(file_path, at_time)
 
     def set_data(self, subtitles=None, video_clips=None, audio_tracks=None, video_path=None, overlay_clips=None, video_keyframes=None):
         self.canvas.set_data(subtitles=subtitles, video_clips=video_clips, audio_tracks=audio_tracks, video_path=video_path, overlay_clips=overlay_clips, video_keyframes=video_keyframes)

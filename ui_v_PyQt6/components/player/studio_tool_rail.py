@@ -108,30 +108,6 @@ class StudioLeftToolRail(QWidget):
 
         layout.addStretch(1)
 
-        # Bottom Quick Undo / Redo buttons
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("background-color: #1e2430; max-height: 1px;")
-        layout.addWidget(sep2)
-
-        btn_undo = QPushButton()
-        btn_undo.setFixedSize(36, 32)
-        btn_undo.setIcon(get_qta_icon("fa5s.undo", color="#94a3b8"))
-        btn_undo.setIconSize(QSize(14, 14))
-        btn_undo.setToolTip("Undo Canvas Action (Ctrl+Z)")
-        btn_undo.clicked.connect(self.undo_requested.emit)
-        self._style_sub_button(btn_undo)
-        layout.addWidget(btn_undo, 0, Qt.AlignmentFlag.AlignCenter)
-
-        btn_redo = QPushButton()
-        btn_redo.setFixedSize(36, 32)
-        btn_redo.setIcon(get_qta_icon("fa5s.redo", color="#94a3b8"))
-        btn_redo.setIconSize(QSize(14, 14))
-        btn_redo.setToolTip("Redo Canvas Action (Ctrl+Y)")
-        btn_redo.clicked.connect(self.redo_requested.emit)
-        self._style_sub_button(btn_redo)
-        layout.addWidget(btn_redo, 0, Qt.AlignmentFlag.AlignCenter)
-
     def _style_sub_button(self, btn: QPushButton):
         btn.setStyleSheet("""
             QPushButton {

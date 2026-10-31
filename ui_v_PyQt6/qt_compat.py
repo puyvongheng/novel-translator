@@ -20,7 +20,7 @@ try:
     from PySide6.QtCore import Qt, QTimer, QThread, Signal, Slot, QPoint, QPointF, QRect, QRectF, QSize, QUrl, QObject, QEvent, QSettings, QMimeData
     from PySide6.QtGui import (
         QColor, QFont, QIcon, QImage, QPixmap, QPainter, QPen, QBrush, 
-        QLinearGradient, QAction, QKeySequence, QCursor, QShortcut,
+        QLinearGradient, QRadialGradient, QAction, QKeySequence, QCursor, QShortcut,
         QTransform, QPainterPath, QImageReader, QMovie, QKeyEvent, QDrag
     )
     from PySide6.QtWidgets import (
@@ -32,7 +32,7 @@ try:
         QMenu, QMenuBar, QStatusBar, QToolBar, QSizePolicy, QDialog, QInputDialog,
         QToolTip, QSpinBox, QDoubleSpinBox, QStackedWidget, QColorDialog, QTabBar,
         QRadioButton, QButtonGroup, QDockWidget, QLayout, QLayoutItem, QSpacerItem, QToolButton,
-        QStyledItemDelegate, QStyle
+        QStyledItemDelegate, QStyle, QAbstractItemView
     )
     QT_LIB = "PySide6"
 except ImportError:
@@ -41,7 +41,7 @@ except ImportError:
         from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal as Signal, pyqtSlot as Slot, QPoint, QPointF, QRect, QRectF, QSize, QUrl, QObject, QEvent, QSettings, QMimeData
         from PyQt6.QtGui import (
             QColor, QFont, QIcon, QImage, QPixmap, QPainter, QPen, QBrush, 
-            QLinearGradient, QAction, QKeySequence, QCursor, QShortcut,
+            QLinearGradient, QRadialGradient, QAction, QKeySequence, QCursor, QShortcut,
             QTransform, QPainterPath, QImageReader, QMovie, QKeyEvent, QDrag
         )
         from PyQt6.QtWidgets import (
@@ -53,7 +53,7 @@ except ImportError:
             QMenu, QMenuBar, QStatusBar, QToolBar, QSizePolicy, QDialog, QInputDialog,
             QToolTip, QSpinBox, QDoubleSpinBox, QStackedWidget, QColorDialog, QTabBar,
             QRadioButton, QButtonGroup, QDockWidget, QLayout, QLayoutItem, QSpacerItem, QToolButton,
-            QStyledItemDelegate, QStyle
+            QStyledItemDelegate, QStyle, QAbstractItemView
         )
         QT_LIB = "PyQt6"
     except ImportError as e:

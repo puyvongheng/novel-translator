@@ -14,6 +14,9 @@ from ui_v_PyQt6.components.player.studio_tool_rail import (
 from ui_v_PyQt6.components.player.guide_dialogs import NewGuideDialog, NewGuideLayoutDialog
 from ui_v_PyQt6.components.timeline import TimelineCanvas, TimelineEditor
 
+from ui_v_PyQt6.components.player.shapes_studio_dialog import VectorShapesStudioDialog
+from ui_v_PyQt6.components.player.speed_control_widget import ModernSpeedControlWidget, ModernSpeedDialog
+
 __all__ = [
     "PlayerView",
     "FullscreenMonitorWindow",
@@ -31,6 +34,8 @@ __all__ = [
     "TimelineCanvas",
     "TimelineEditor",
     "NewGuideDialog",
-    "NewGuideLayoutDialog"
+    "NewGuideLayoutDialog",
+    "VectorShapesStudioDialog",
+    "ModernSpeedControlWidget",
+    "ModernSpeedDialog",
 ]
-

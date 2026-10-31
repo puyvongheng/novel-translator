@@ -109,8 +109,17 @@ class CookieGrabberDialog(QDialog):
 
         # ── BROWSER VIEW (QWebEngineView) ──
         if WEBENGINE_AVAILABLE:
+            from ui_v_PyQt6.components.downloader.media_browser_dialog import setup_html5_media_profile, get_shared_persistent_profile
+            from PySide6.QtWebEngineCore import QWebEnginePage
             self.web_view = QWebEngineView(self)
-            self.cookie_store = self.web_view.page().profile().cookieStore()
+            profile = get_shared_persistent_profile()
+            if profile:
+                self.web_view.setPage(QWebEnginePage(profile, self.web_view))
+            else:
+                profile = self.web_view.page().profile()
+                setup_html5_media_profile(profile)
+
+            self.cookie_store = profile.cookieStore()
             self.cookie_store.cookieAdded.connect(self._on_cookie_added)
             self.web_view.urlChanged.connect(self._on_url_changed)
             self.web_view.loadFinished.connect(self._on_load_finished)
@@ -228,3 +237,19 @@ class CookieGrabberDialog(QDialog):
 
         except Exception as e:
             QMessageBox.critical(self, "Error Saving", f"មិនអាចរក្សាទុក Cookies បានទេ: {e}")
+
+    def done(self, r):
+        try:
+            if hasattr(self, "cookie_store") and self.cookie_store:
+                self.cookie_store.cookieAdded.disconnect(self._on_cookie_added)
+        except Exception:
+            pass
+        super().done(r)
+
+    def closeEvent(self, event):
+        try:
+            if hasattr(self, "cookie_store") and self.cookie_store:
+                self.cookie_store.cookieAdded.disconnect(self._on_cookie_added)
+        except Exception:
+            pass
+        super().closeEvent(event)

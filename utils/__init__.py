@@ -8,7 +8,9 @@ from utils.time_utils import (
     format_voice_filename,
     format_ass_timestamp,
     parse_timestamp_to_seconds,
-    format_duration_short
+    format_duration_short,
+    format_compact_time,
+    format_compact_timing_range
 )
 from utils.srt_utils import (
     is_khmer_text,
@@ -31,6 +33,8 @@ from utils.audio_player import play_audio_file
 
 __all__ = [
     "format_timestamp",
+    "format_compact_time",
+    "format_compact_timing_range",
     "format_filename_timestamp",
     "format_voice_filename",
     "format_ass_timestamp",

@@ -80,6 +80,26 @@ class CanvaControlsBar(QFrame):
         self.combo_zoom.currentIndexChanged.connect(self._on_zoom_changed)
         layout.addWidget(self.combo_zoom)
 
+        # 2b. Modern Playback & Export Speed Button [ ⚡ 1x ▾ ]
+        self.btn_speed = QPushButton("⚡ 1x ▾")
+        self.btn_speed.setToolTip("Video Speed Control (ល្បឿនវីដេអូ 0.5x - 2.0x)")
+        self.btn_speed.setStyleSheet("""
+            QPushButton {
+                background: #141923;
+                border: 1px solid #283344;
+                border-radius: 4px;
+                color: #f59e0b;
+                font-weight: bold;
+                padding: 3px 8px;
+            }
+            QPushButton:hover {
+                background: #1e293b;
+                border-color: #f59e0b;
+            }
+        """)
+        self.btn_speed.clicked.connect(self._show_speed_popup)
+        layout.addWidget(self.btn_speed)
+
         # Separator
         layout.addWidget(self._create_separator())
 
@@ -254,6 +274,30 @@ class CanvaControlsBar(QFrame):
         self.canvas.zoom_level = mapping.get(idx, 1.0)
         self.canvas.update()
 
+    def _show_speed_popup(self):
+        from ui_v_PyQt6.components.player.speed_control_widget import ModernSpeedDialog
+        # Retrieve player or parent window playback speed
+        win = self.window()
+        player = getattr(self.canvas, "player", None) or getattr(win, "player_view", None) or getattr(win, "player", None)
+        cur_spd = getattr(player, "playback_speed", 1.0) if player else 1.0
+        dlg = ModernSpeedDialog(current_speed=cur_spd, parent=self)
+        dlg.speed_changed.connect(self._on_speed_changed)
+        dlg.popup_near(self.btn_speed)
+
+    def _on_speed_changed(self, spd: float):
+        if abs(spd - round(spd)) < 0.01:
+            txt = f"⚡ {int(round(spd))}x ▾"
+        elif abs(spd * 10 - round(spd * 10)) < 0.01:
+            txt = f"⚡ {spd:.1f}x ▾"
+        else:
+            txt = f"⚡ {spd:.2f}x ▾"
+        self.btn_speed.setText(txt)
+
+        win = self.window()
+        player = getattr(self.canvas, "player", None) or getattr(win, "player_view", None) or getattr(win, "player", None)
+        if player and hasattr(player, "set_playback_speed"):
+            player.set_playback_speed(spd)
+
     def _browse_image(self):
         f, _ = QFileDialog.getOpenFileName(
             self, "Select Overlay Image / Sticker / GIF", "",
@@ -323,6 +367,11 @@ class CanvaControlsBar(QFrame):
         act_show.setCheckable(True)
         act_show.setChecked(getattr(self.canvas, "show_guides", True))
         act_show.triggered.connect(self.canvas.toggle_guides)
+
+        act_rulers = menu.addAction("4-Corner Guides & Rulers")
+        act_rulers.setCheckable(True)
+        act_rulers.setChecked(getattr(self.canvas, "show_rulers", False))
+        act_rulers.triggered.connect(self.canvas.toggle_rulers)
 
         menu.addAction("Clear All Guides").triggered.connect(self.canvas.clear_guides)
         menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))

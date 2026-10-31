@@ -6,8 +6,20 @@ With built-in studio-quality post-processing for a richer, more melodious Khmer 
 
 import asyncio
 import os
+import random
+import threading
 import subprocess
 import edge_tts
+
+_thread_local = threading.local()
+
+def _get_thread_loop():
+    loop = getattr(_thread_local, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _thread_local.loop = loop
+    return loop
 
 # Standard Edge-TTS Khmer voices
 EDGE_KHMER_VOICES = {
@@ -71,11 +83,13 @@ class EdgeTTSModel:
         rate: str = "+0%",
         pitch: str = "+8Hz",   # +8Hz default: Khmer sounds warmer & more natural
         volume: str = "+0%",
-        enhance: bool = True   # apply studio post-processing by default
+        enhance: bool = True,  # apply studio post-processing by default
+        proxy: str = None      # Optional proxy (http://ip:port or socks5://ip:port) to bypass IP blocks
     ) -> bool:
         """
         Synthesizes text into an MP3 file using Edge-TTS with automatic retry,
-        then applies studio enhancement filters ensuring full voice preservation.
+        smart rate-limit backoff, proxy support to bypass Microsoft IP blocks,
+        and studio enhancement filters ensuring full voice preservation.
         """
         if not text or not text.strip() or not any(c.isalnum() for c in text):
             return False
@@ -89,31 +103,46 @@ class EdgeTTSModel:
             print(f"⚠️ [Edge-TTS] អត្ថបទនៅជាអក្សរចិន ('{text[:25]}...') មិនអាចនិយាយជាមួយសំឡេងខ្មែរ {target_voice} បានទេ! សូមបកប្រែជាភាសាខ្មែរជាមុនសិន។")
             return False
 
+        # Auto-detect proxy from environment if not explicitly passed
+        active_proxy = proxy or os.environ.get("EDGE_TTS_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or None
+
         try:
             is_m4a = output_path.lower().endswith(".m4a")
-            # Step 1: Raw Edge TTS synthesis with retry loop
+            # Step 1: Raw Edge TTS synthesis with smart retry & backoff
             raw_path = output_path + ".raw.mp3" if (enhance or is_m4a) else output_path
 
             async def _speak():
-                for attempt in range(3):
+                for attempt in range(4):
                     try:
                         communicate = edge_tts.Communicate(
                             text.strip(),
                             target_voice,
                             rate=rate,
                             pitch=pitch,
-                            volume=volume
+                            volume=volume,
+                            proxy=active_proxy,
+                            connect_timeout=15,
+                            receive_timeout=45
                         )
                         await communicate.save(raw_path)
                         if os.path.exists(raw_path) and os.path.getsize(raw_path) > 100:
                             return True
                     except Exception as err:
-                        if attempt == 2:
-                            print(f"Edge TTS attempt {attempt+1} error: {err}")
-                        await asyncio.sleep(0.3 * (attempt + 1))
+                        err_str = str(err)
+                        is_rate_limit = ("403" in err_str or "429" in err_str or "Too Many Requests" in err_str or "WSServerHandshakeError" in err_str)
+                        if attempt == 3:
+                            if is_rate_limit:
+                                print(f"⚠️ [Edge-TTS Block/Rate-Limit] Microsoft IP block detected: {err}. សូមប្រើ VPN (WARP) ឬ Proxy ដើម្បីប្តូរ IP!")
+                            else:
+                                print(f"Edge TTS attempt {attempt+1} error: {err}")
+                        
+                        # Adaptive backoff + jitter for rate-limiting bypass
+                        backoff = (1.2 ** attempt) + random.uniform(0.2, 0.8) if is_rate_limit else (0.3 * (attempt + 1))
+                        await asyncio.sleep(backoff)
                 return os.path.exists(raw_path) and os.path.getsize(raw_path) > 100
 
-            ok_speak = asyncio.run(_speak())
+            loop = _get_thread_loop()
+            ok_speak = loop.run_until_complete(_speak())
 
             if not ok_speak or not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
                 return False
@@ -207,7 +236,8 @@ def generate_edge_tts(
     voice_name: str = "km-KH-PisethNeural",
     rate: str = "+0%",
     pitch: str = "+8Hz",
-    enhance: bool = True
+    enhance: bool = True,
+    proxy: str = None
 ) -> bool:
     model = EdgeTTSModel()
-    return model.generate_speech(text, output_path, voice_name=voice_name, rate=rate, pitch=pitch, enhance=enhance)
+    return model.generate_speech(text, output_path, voice_name=voice_name, rate=rate, pitch=pitch, enhance=enhance, proxy=proxy)

@@ -606,7 +606,54 @@ class ObjectPropertiesPanel(QWidget):
         self.spin_audio_speed.setStyleSheet(self._input_style())
         self.spin_audio_speed.valueChanged.connect(self._on_audio_props_changed)
         row_vol_spd.addWidget(self.spin_audio_speed, 1)
+
+        self.btn_audio_speed_popup = QPushButton("⚡ Speed")
+        self.btn_audio_speed_popup.setFixedHeight(26)
+        self.btn_audio_speed_popup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_audio_speed_popup.setStyleSheet("""
+            QPushButton {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                color: #f59e0b;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 1px 6px;
+            }
+            QPushButton:hover {
+                background: #334155;
+                color: #ffffff;
+            }
+        """)
+        self.btn_audio_speed_popup.clicked.connect(self._open_modern_speed_dialog)
+        row_vol_spd.addWidget(self.btn_audio_speed_popup)
         a_layout.addLayout(row_vol_spd)
+
+        # Quick Volume Presets (25%, 50%, 75%, 100%, 150%)
+        row_quick_vols = QHBoxLayout()
+        row_quick_vols.setSpacing(4)
+        for qv in [25, 50, 75, 100, 150]:
+            btn_qv = QPushButton(f"{qv}%")
+            btn_qv.setFixedHeight(20)
+            btn_qv.setStyleSheet("""
+                QPushButton {
+                    background: #1e2430;
+                    border: 1px solid #334155;
+                    border-radius: 3px;
+                    color: #94a3b8;
+                    font-size: 9px;
+                    font-weight: 600;
+                    padding: 0 4px;
+                }
+                QPushButton:hover {
+                    background: #d97706;
+                    color: #ffffff;
+                    border-color: #f59e0b;
+                }
+            """)
+            btn_qv.clicked.connect(lambda checked=False, val=qv: self.spin_audio_vol.setValue(val))
+            row_quick_vols.addWidget(btn_qv)
+        a_layout.addLayout(row_quick_vols)
 
         # Rate & Pitch Adjustments
         self.row_rates = QHBoxLayout()
@@ -753,6 +800,11 @@ class ObjectPropertiesPanel(QWidget):
         self.group_cc_stats = self._build_cc_analytics_group()
         self.container_layout.addWidget(self.group_cc_stats)
         self.group_cc_stats.hide()
+
+        # ---------------- 10. MASTER VIDEO ACTIONS & PROPERTIES PANEL ----------------
+        self.group_video = self._build_video_properties_group()
+        self.container_layout.addWidget(self.group_video)
+        self.group_video.hide()
 
         self.container_layout.addStretch()
         scroll.setWidget(self.container_widget)
@@ -1932,6 +1984,8 @@ class ObjectPropertiesPanel(QWidget):
         itype = self.target_type
 
         self.empty_card.hide()
+        if hasattr(self, "group_video"):
+            self.group_video.hide()
         is_shape = (itype == "shape")
         self.group_timing.setVisible(True)
         self.group_transform.setVisible(True)
@@ -2048,6 +2102,8 @@ class ObjectPropertiesPanel(QWidget):
         self.target_type = "subtitle"
 
         self.empty_card.hide()
+        if hasattr(self, "group_video"):
+            self.group_video.hide()
         self.group_timing.show()
         self.group_transform.hide()
         self.group_blur.hide()
@@ -2119,6 +2175,8 @@ class ObjectPropertiesPanel(QWidget):
         self.target_sub_idx = audio_data.get("sub_idx", -1)
 
         self.empty_card.hide()
+        if hasattr(self, "group_video"):
+            self.group_video.hide()
         self.group_timing.show()
         self.group_transform.hide()
         self.group_blur.hide()
@@ -2186,6 +2244,8 @@ class ObjectPropertiesPanel(QWidget):
         self.group_ps_shape.hide()
         self.group_audio.hide()
         self.group_cc_stats.hide()
+        if hasattr(self, "group_video"):
+            self.group_video.hide()
 
     def _build_cc_analytics_group(self) -> QGroupBox:
         """
@@ -2330,6 +2390,8 @@ class ObjectPropertiesPanel(QWidget):
         self.group_shape.hide()
         self.group_ps_shape.hide()
         self.group_audio.hide()
+        if hasattr(self, "group_video"):
+            self.group_video.hide()
         self.group_cc_stats.show()
 
         # Update Header Inspector Bar
@@ -2610,6 +2672,13 @@ class ObjectPropertiesPanel(QWidget):
                 raw["voice_effect"] = fx_key
             self.audio_modified.emit(self.target_object)
 
+    def _open_modern_speed_dialog(self):
+        from ui_v_PyQt6.components.player.speed_control_widget import ModernSpeedDialog
+        cur_spd = self.spin_audio_speed.value()
+        dlg = ModernSpeedDialog(current_speed=cur_spd, parent=self)
+        dlg.speed_changed.connect(lambda val: self.spin_audio_speed.setValue(val))
+        dlg.popup_near(self.btn_audio_speed_popup)
+
     def _on_open_capcut_dialog_from_panel(self):
         """Opens the full CapCut Voice Effects Studio Dialog from properties panel."""
         if not self.target_object:
@@ -2740,3 +2809,540 @@ class ObjectPropertiesPanel(QWidget):
                     g = raw.get("gender")
                     char_name = "តួស្រី (Female)" if g == "female" else ("តួប្រុស (Male)" if g == "male" else "")
             self.batch_voice_effect_applied.emit(fx_key, scope, char_name)
+
+    # ------------------ MASTER VIDEO PROPERTIES & ACTIONS ------------------
+    def _build_video_properties_group(self) -> QGroupBox:
+        grp = QGroupBox("🎬 Master Video Controls & Actions (ផ្ទាំងបញ្ជាវីដេអូមេ)")
+        self._style_groupbox(grp)
+        layout = QVBoxLayout(grp)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(8)
+
+        # 1. PRIMARY ACTION: EASY RESET TO FULL VIDEO (for user easy reset to refull video)
+        card_reset = QFrame()
+        card_reset.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0f2b48, stop:1 #0369a1);
+                border: 1px solid #38bdf8;
+                border-radius: 6px;
+                padding: 4px;
+            }
+        """)
+        c_rst_layout = QVBoxLayout(card_reset)
+        c_rst_layout.setContentsMargins(6, 6, 6, 6)
+        c_rst_layout.setSpacing(4)
+
+        self.btn_reset_full_video = QPushButton(" ↺ Reset to Full Video (ស្តារវីដេអូពេញដើមវិញ)")
+        self.btn_reset_full_video.setIcon(get_sync_icon(16, color="#ffffff"))
+        self.btn_reset_full_video.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_full_video.setStyleSheet("""
+            QPushButton {
+                background-color: #0284c7;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 12px;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+            QPushButton:hover {
+                background-color: #0369a1;
+            }
+        """)
+        self.btn_reset_full_video.setToolTip("កំណត់ទំហំ ទីតាំង បង្វិល និងប្លង់វីដេអូ ឱ្យត្រឡប់មកពេញដើម 100% ភ្លាមៗ (Reset Pan, Zoom, Rotation & Framing to Original)")
+        self.btn_reset_full_video.clicked.connect(self._on_video_reset_to_full_clicked)
+        c_rst_layout.addWidget(self.btn_reset_full_video)
+
+        lbl_rst_hint = QLabel("✨ ចុចប៊ូតុងនេះដើម្បីស្តារវីដេអូឱ្យពេញស៊ុម 100% និងចំប្លង់កណ្តាលភ្លាមៗ")
+        lbl_rst_hint.setStyleSheet("color: #bae6fd; font-size: 10px;")
+        lbl_rst_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        c_rst_layout.addWidget(lbl_rst_hint)
+        layout.addWidget(card_reset)
+
+        # 2. MOVE & POSITION (ប្លង់ និងទីតាំង)
+        box_move = QGroupBox("📐 Move & Position (ប្លង់ និងទីតាំង)")
+        self._style_sub_groupbox(box_move)
+        bm_layout = QVBoxLayout(box_move)
+        bm_layout.setContentsMargins(6, 8, 6, 6)
+        bm_layout.setSpacing(6)
+
+        # Directional D-Pad buttons for intuitive moving
+        dpad_layout = QGridLayout()
+        dpad_layout.setSpacing(4)
+
+        btn_up = QPushButton("⬆️")
+        btn_up.setToolTip("Move Video Up (រំកិលឡើងលើ)")
+        btn_up.clicked.connect(lambda: self._nudge_video(0.0, -0.05))
+        self._style_nudge_btn(btn_up)
+
+        btn_down = QPushButton("⬇️")
+        btn_down.setToolTip("Move Video Down (រំកិលចុះក្រោម)")
+        btn_down.clicked.connect(lambda: self._nudge_video(0.0, 0.05))
+        self._style_nudge_btn(btn_down)
+
+        btn_left = QPushButton("⬅️")
+        btn_left.setToolTip("Move Video Left (រំកិលទៅឆ្វេង)")
+        btn_left.clicked.connect(lambda: self._nudge_video(-0.05, 0.0))
+        self._style_nudge_btn(btn_left)
+
+        btn_right = QPushButton("➡️")
+        btn_right.setToolTip("Move Video Right (រំកិលទៅស្តាំ)")
+        btn_right.clicked.connect(lambda: self._nudge_video(0.05, 0.0))
+        self._style_nudge_btn(btn_right)
+
+        btn_center = QPushButton("🎯")
+        btn_center.setToolTip("Center Video (ដាក់ចំកណ្តាល)")
+        btn_center.clicked.connect(self._center_video_position)
+        self._style_nudge_btn(btn_center)
+
+        dpad_layout.addWidget(btn_up, 0, 1)
+        dpad_layout.addWidget(btn_left, 1, 0)
+        dpad_layout.addWidget(btn_center, 1, 1)
+        dpad_layout.addWidget(btn_right, 1, 2)
+        dpad_layout.addWidget(btn_down, 2, 1)
+        bm_layout.addLayout(dpad_layout)
+
+        # Pan X Slider & Spin
+        row_x = QHBoxLayout()
+        row_x.addWidget(QLabel("Offset X:"))
+        self.slider_video_x = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video_x.setRange(-200, 200)
+        self.slider_video_x.setValue(0)
+        self.slider_video_x.valueChanged.connect(self._on_video_x_slider_changed)
+        row_x.addWidget(self.slider_video_x)
+        self.spin_video_x = QDoubleSpinBox()
+        self.spin_video_x.setRange(-2.0, 2.0)
+        self.spin_video_x.setSingleStep(0.05)
+        self.spin_video_x.setValue(0.0)
+        self.spin_video_x.setStyleSheet(self._input_style())
+        self.spin_video_x.valueChanged.connect(self._on_video_x_spin_changed)
+        row_x.addWidget(self.spin_video_x)
+        bm_layout.addLayout(row_x)
+
+        # Pan Y Slider & Spin
+        row_y = QHBoxLayout()
+        row_y.addWidget(QLabel("Offset Y:"))
+        self.slider_video_y = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video_y.setRange(-200, 200)
+        self.slider_video_y.setValue(0)
+        self.slider_video_y.valueChanged.connect(self._on_video_y_slider_changed)
+        row_y.addWidget(self.slider_video_y)
+        self.spin_video_y = QDoubleSpinBox()
+        self.spin_video_y.setRange(-2.0, 2.0)
+        self.spin_video_y.setSingleStep(0.05)
+        self.spin_video_y.setValue(0.0)
+        self.spin_video_y.setStyleSheet(self._input_style())
+        self.spin_video_y.valueChanged.connect(self._on_video_y_spin_changed)
+        row_y.addWidget(self.spin_video_y)
+        bm_layout.addLayout(row_y)
+
+        # Scale / Zoom
+        row_scale = QHBoxLayout()
+        row_scale.addWidget(QLabel("Zoom / Scale:"))
+        self.slider_video_scale = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video_scale.setRange(50, 500)
+        self.slider_video_scale.setValue(100)
+        self.slider_video_scale.valueChanged.connect(self._on_video_scale_slider_changed)
+        row_scale.addWidget(self.slider_video_scale)
+        self.spin_video_scale = QDoubleSpinBox()
+        self.spin_video_scale.setRange(0.5, 5.0)
+        self.spin_video_scale.setSingleStep(0.1)
+        self.spin_video_scale.setValue(1.0)
+        self.spin_video_scale.setStyleSheet(self._input_style())
+        self.spin_video_scale.valueChanged.connect(self._on_video_scale_spin_changed)
+        row_scale.addWidget(self.spin_video_scale)
+        bm_layout.addLayout(row_scale)
+
+        layout.addWidget(box_move)
+
+        # 3. ROTATE & FLIP (បង្វិល និងឆ្លុះ)
+        box_rotate = QGroupBox("🔄 Rotate & Mirror Flip (បង្វិល និងឆ្លុះ)")
+        self._style_sub_groupbox(box_rotate)
+        br_layout = QHBoxLayout(box_rotate)
+        br_layout.setContentsMargins(6, 8, 6, 6)
+        br_layout.setSpacing(6)
+
+        self.btn_rotate_video = QPushButton(" 🔄 Rotate (0°)")
+        self.btn_rotate_video.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rotate_video.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_rotate_video.clicked.connect(self._on_rotate_video_clicked)
+        br_layout.addWidget(self.btn_rotate_video)
+
+        self.btn_flip_h = QPushButton(" ↔️ Flip H")
+        self.btn_flip_h.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_flip_h.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_flip_h.clicked.connect(self._on_flip_h_clicked)
+        br_layout.addWidget(self.btn_flip_h)
+
+        self.btn_flip_v = QPushButton(" ↕️ Flip V")
+        self.btn_flip_v.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_flip_v.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_flip_v.clicked.connect(self._on_flip_v_clicked)
+        br_layout.addWidget(self.btn_flip_v)
+
+        layout.addWidget(box_rotate)
+
+        # 4. FRAMING & ASPECT RATIO (ប្លង់កាត់ត)
+        box_frame = QGroupBox("📺 Framing & Aspect Ratio (ប្លង់កាត់ត)")
+        self._style_sub_groupbox(box_frame)
+        bf_layout = QVBoxLayout(box_frame)
+        bf_layout.setContentsMargins(6, 8, 6, 6)
+        bf_layout.setSpacing(6)
+
+        row_fit = QHBoxLayout()
+        self.btn_fit_blur = QPushButton(" 📺 Fit + Blur")
+        self.btn_fit_blur.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fit_blur.setStyleSheet(self._action_btn_style("#0284c7", "#0369a1"))
+        self.btn_fit_blur.clicked.connect(lambda: self._set_video_fit_mode("fit"))
+        row_fit.addWidget(self.btn_fit_blur)
+
+        self.btn_fill_crop = QPushButton(" 📐 Crop to Fill")
+        self.btn_fill_crop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fill_crop.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_fill_crop.clicked.connect(lambda: self._set_video_fit_mode("fill"))
+        row_fit.addWidget(self.btn_fill_crop)
+
+        self.btn_letterbox = QPushButton(" ⬛ Letterbox")
+        self.btn_letterbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_letterbox.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_letterbox.clicked.connect(lambda: self._set_video_fit_mode("black"))
+        row_fit.addWidget(self.btn_letterbox)
+        bf_layout.addLayout(row_fit)
+
+        # Quick Ratio Buttons
+        row_ratios = QHBoxLayout()
+        for r_label, r_mode in [("16:9", "16:9"), ("9:16", "9:16"), ("1:1", "1:1"), ("4:5", "4:5")]:
+            btn_r = QPushButton(r_label)
+            btn_r.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_r.setStyleSheet(self._action_btn_style("#171b24", "#232b38"))
+            btn_r.clicked.connect(lambda _, m=r_mode: self._set_video_ratio(m))
+            row_ratios.addWidget(btn_r)
+        bf_layout.addLayout(row_ratios)
+
+        layout.addWidget(box_frame)
+
+        # 5. COLOR PRESETS & FILTERS (Filters ពណ៌)
+        box_filter = QGroupBox("🎨 Color Presets & Filters (តម្រងពណ៌)")
+        self._style_sub_groupbox(box_filter)
+        bfilt_layout = QVBoxLayout(box_filter)
+        bfilt_layout.setContentsMargins(6, 8, 6, 6)
+        bfilt_layout.setSpacing(6)
+
+        row_preset = QHBoxLayout()
+        row_preset.addWidget(QLabel("Color Preset:"))
+        self.combo_video_filter = QComboBox()
+        self.combo_video_filter.addItems([
+            "Original (ដើម)",
+            "Cinematic (ភាពយន្ត)",
+            "Film (កុនបុរាណ)",
+            "Mono (ស-ខ្មៅ)",
+            "Bright (ភ្លឺច្បាស់)",
+            "Warm (កក់ក្តៅ)",
+            "Cool (ត្រជាក់)",
+            "Night Scene (រាត្រី)"
+        ])
+        self.combo_video_filter.setStyleSheet(self._input_style())
+        self.combo_video_filter.currentIndexChanged.connect(self._on_video_preset_changed)
+        row_preset.addWidget(self.combo_video_filter)
+        bfilt_layout.addLayout(row_preset)
+
+        # Sharpness Slider
+        row_shp = QHBoxLayout()
+        row_shp.addWidget(QLabel("Sharpness:"))
+        self.slider_video_sharpness = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video_sharpness.setRange(0, 100)
+        self.slider_video_sharpness.setValue(0)
+        self.slider_video_sharpness.valueChanged.connect(self._on_video_sharpness_changed)
+        row_shp.addWidget(self.slider_video_sharpness)
+        self.lbl_video_sharpness = QLabel("0")
+        self.lbl_video_sharpness.setFixedWidth(28)
+        row_shp.addWidget(self.lbl_video_sharpness)
+        bfilt_layout.addLayout(row_shp)
+
+        # Blur Slider
+        row_blr = QHBoxLayout()
+        row_blr.addWidget(QLabel("Gaussian Blur:"))
+        self.slider_video_blur = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video_blur.setRange(0, 100)
+        self.slider_video_blur.setValue(0)
+        self.slider_video_blur.valueChanged.connect(self._on_video_blur_changed)
+        row_blr.addWidget(self.slider_video_blur)
+        self.lbl_video_blur = QLabel("0")
+        self.lbl_video_blur.setFixedWidth(28)
+        row_blr.addWidget(self.lbl_video_blur)
+        bfilt_layout.addLayout(row_blr)
+
+        self.btn_reset_filters = QPushButton(" 🧹 Reset Color & Filters (លុបពណ៌ដើម)")
+        self.btn_reset_filters.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_filters.setStyleSheet(self._action_btn_style("#1e293b", "#334155"))
+        self.btn_reset_filters.clicked.connect(self._on_reset_filters_clicked)
+        bfilt_layout.addWidget(self.btn_reset_filters)
+
+        layout.addWidget(box_filter)
+        return grp
+
+    def _style_sub_groupbox(self, gbox: QGroupBox):
+        gbox.setStyleSheet("""
+            QGroupBox {
+                margin-top: 6px;
+                padding-top: 14px;
+                border: 1px solid #283344;
+                border-radius: 6px;
+                background-color: #161b24;
+                font-size: 10px;
+                font-weight: bold;
+                color: #94a3b8;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 4px;
+                left: 8px;
+                color: #38bdf8;
+            }
+        """)
+
+    def _style_nudge_btn(self, btn: QPushButton):
+        btn.setFixedSize(34, 28)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e2533;
+                border: 1px solid #334155;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+                border-color: #38bdf8;
+            }
+        """)
+
+    def _action_btn_style(self, bg_col: str, border_col: str) -> str:
+        return f"""
+            QPushButton {{
+                background-color: {bg_col};
+                color: #ffffff;
+                border: 1px solid {border_col};
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #0284c7;
+                border-color: #38bdf8;
+            }}
+        """
+
+    def set_target_video(self, canvas, video_path: str = None):
+        """Sets active Master Video from video canvas or timeline."""
+        if canvas is None:
+            self._show_empty_state()
+            return
+
+        self._updating_ui = True
+        self.target_canvas = canvas
+        self.target_type = "video"
+        self.target_object = None
+        self.target_sub_idx = -1
+
+        self.empty_card.hide()
+        self.group_timing.hide()
+        self.group_transform.hide()
+        self.group_blur.hide()
+        self.group_text.hide()
+        self.group_image_fx.hide()
+        self.group_shape.hide()
+        self.group_ps_shape.hide()
+        self.group_audio.hide()
+        self.group_cc_stats.hide()
+        self.group_video.show()
+
+        # Update header badge
+        self.lbl_icon.setText("🎬")
+        v_title = os.path.basename(video_path) if video_path else "Master Video Track"
+        if len(v_title) > 28:
+            v_title = v_title[:25] + "..."
+        self.lbl_title.setText(v_title)
+        self.lbl_badge.setText("Master Video")
+        self.lbl_badge.setStyleSheet("background-color: #f59e0b; color: #000000; padding: 2px 8px; border-radius: 4px; font-weight: bold;")
+
+        # Populate controls from canvas
+        ox = getattr(canvas, "crop_offset_x", 0.0)
+        oy = getattr(canvas, "crop_offset_y", 0.0)
+        scale = getattr(canvas, "video_scale", 1.0)
+        self.spin_video_x.setValue(ox)
+        self.slider_video_x.setValue(int(ox * 100))
+        self.spin_video_y.setValue(oy)
+        self.slider_video_y.setValue(int(oy * 100))
+        self.spin_video_scale.setValue(scale)
+        self.slider_video_scale.setValue(int(scale * 100))
+
+        rot = int(getattr(canvas, "video_rotation_angle", 0.0))
+        self.btn_rotate_video.setText(f" 🔄 Rotate ({rot}°)")
+
+        preset = getattr(canvas, "color_preset", "none")
+        preset_map = {
+            "none": 0, "cinematic": 1, "film": 2, "mono": 3,
+            "bright": 4, "warm": 5, "cool": 6, "night": 7
+        }
+        self.combo_video_filter.setCurrentIndex(preset_map.get(preset, 0))
+
+        shp = int(getattr(canvas, "canvas_sharpness", 0))
+        blr = int(getattr(canvas, "canvas_blur", 0))
+        self.slider_video_sharpness.setValue(shp)
+        self.lbl_video_sharpness.setText(str(shp))
+        self.slider_video_blur.setValue(blr)
+        self.lbl_video_blur.setText(str(blr))
+
+        self._updating_ui = False
+
+    def _on_video_reset_to_full_clicked(self):
+        """Resets video zoom, pan, rotation, flip, and framing back to 100% full view."""
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.reset_video_transform()
+            self.target_canvas.set_video_fit_mode("fit")
+            self.set_target_video(self.target_canvas)
+
+    def _on_video_x_slider_changed(self, val: int):
+        if self._updating_ui:
+            return
+        ox = val / 100.0
+        self.spin_video_x.blockSignals(True)
+        self.spin_video_x.setValue(ox)
+        self.spin_video_x.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            oy = getattr(self.target_canvas, "crop_offset_y", 0.0)
+            self.target_canvas.set_crop_offset(ox, oy)
+
+    def _on_video_x_spin_changed(self, val: float):
+        if self._updating_ui:
+            return
+        self.slider_video_x.blockSignals(True)
+        self.slider_video_x.setValue(int(val * 100))
+        self.slider_video_x.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            oy = getattr(self.target_canvas, "crop_offset_y", 0.0)
+            self.target_canvas.set_crop_offset(val, oy)
+
+    def _on_video_y_slider_changed(self, val: int):
+        if self._updating_ui:
+            return
+        oy = val / 100.0
+        self.spin_video_y.blockSignals(True)
+        self.spin_video_y.setValue(oy)
+        self.spin_video_y.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            ox = getattr(self.target_canvas, "crop_offset_x", 0.0)
+            self.target_canvas.set_crop_offset(ox, oy)
+
+    def _on_video_y_spin_changed(self, val: float):
+        if self._updating_ui:
+            return
+        self.slider_video_y.blockSignals(True)
+        self.slider_video_y.setValue(int(val * 100))
+        self.slider_video_y.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            ox = getattr(self.target_canvas, "crop_offset_x", 0.0)
+            self.target_canvas.set_crop_offset(ox, val)
+
+    def _on_video_scale_slider_changed(self, val: int):
+        if self._updating_ui:
+            return
+        sc = val / 100.0
+        self.spin_video_scale.blockSignals(True)
+        self.spin_video_scale.setValue(sc)
+        self.spin_video_scale.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.set_video_scale(sc)
+
+    def _on_video_scale_spin_changed(self, val: float):
+        if self._updating_ui:
+            return
+        self.slider_video_scale.blockSignals(True)
+        self.slider_video_scale.setValue(int(val * 100))
+        self.slider_video_scale.blockSignals(False)
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.set_video_scale(val)
+
+    def _nudge_video(self, dx: float, dy: float):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.nudge_video_pan(dx, dy)
+            self._updating_ui = True
+            ox = getattr(self.target_canvas, "crop_offset_x", 0.0)
+            oy = getattr(self.target_canvas, "crop_offset_y", 0.0)
+            self.spin_video_x.setValue(ox)
+            self.slider_video_x.setValue(int(ox * 100))
+            self.spin_video_y.setValue(oy)
+            self.slider_video_y.setValue(int(oy * 100))
+            self._updating_ui = False
+
+    def _center_video_position(self):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.set_crop_offset(0.0, 0.0)
+            self._updating_ui = True
+            self.spin_video_x.setValue(0.0)
+            self.slider_video_x.setValue(0)
+            self.spin_video_y.setValue(0.0)
+            self.slider_video_y.setValue(0)
+            self._updating_ui = False
+
+    def _on_rotate_video_clicked(self):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.rotate_video_90()
+            rot = int(getattr(self.target_canvas, "video_rotation_angle", 0.0))
+            self.btn_rotate_video.setText(f" 🔄 Rotate ({rot}°)")
+
+    def _on_flip_h_clicked(self):
+        if getattr(self, "target_canvas", None):
+            fh = self.target_canvas.toggle_flip_horizontal()
+            self.btn_flip_h.setStyleSheet(self._action_btn_style("#0284c7" if fh else "#1e293b", "#38bdf8" if fh else "#334155"))
+
+    def _on_flip_v_clicked(self):
+        if getattr(self, "target_canvas", None):
+            fv = self.target_canvas.toggle_flip_vertical()
+            self.btn_flip_v.setStyleSheet(self._action_btn_style("#0284c7" if fv else "#1e293b", "#38bdf8" if fv else "#334155"))
+
+    def _set_video_fit_mode(self, mode: str):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.set_video_fit_mode(mode)
+
+    def _set_video_ratio(self, ratio_mode: str):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.set_aspect_ratio(ratio_mode)
+
+    def _on_video_preset_changed(self, idx: int):
+        if self._updating_ui or not getattr(self, "target_canvas", None):
+            return
+        presets = ["none", "cinematic", "film", "mono", "bright", "warm", "cool", "night"]
+        p_name = presets[idx] if idx < len(presets) else "none"
+        self.target_canvas.color_preset = p_name
+        self.target_canvas._update_processed_frame()
+        self.target_canvas.update()
+
+    def _on_video_sharpness_changed(self, val: int):
+        self.lbl_video_sharpness.setText(str(val))
+        if self._updating_ui or not getattr(self, "target_canvas", None):
+            return
+        self.target_canvas.set_canvas_sharpness(val)
+
+    def _on_video_blur_changed(self, val: int):
+        self.lbl_video_blur.setText(str(val))
+        if self._updating_ui or not getattr(self, "target_canvas", None):
+            return
+        self.target_canvas.set_canvas_blur(val)
+
+    def _on_reset_filters_clicked(self):
+        if getattr(self, "target_canvas", None):
+            self.target_canvas.reset_effects()
+            self.target_canvas.color_preset = "none"
+            self.target_canvas._update_processed_frame()
+            self.target_canvas.update()
+            self._updating_ui = True
+            self.combo_video_filter.setCurrentIndex(0)
+            self.slider_video_sharpness.setValue(0)
+            self.lbl_video_sharpness.setText("0")
+            self.slider_video_blur.setValue(0)
+            self.lbl_video_blur.setText("0")
+            self._updating_ui = False

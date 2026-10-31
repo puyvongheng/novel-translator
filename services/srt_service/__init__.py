@@ -12,6 +12,7 @@ from services.srt_service.funasr_transcriber import FunASRTranscriber
 from services.srt_service.speaker_verification import SpeakerVerificationService
 from services.srt_service.srt_formatter import SrtFormatter
 from services.srt_service.srt_pipeline import capture_video_subtitles
+from services.srt_service.gender_splitter import GenderSrtSplitter
 
 __all__ = [
     "AudioExtractor",
@@ -23,4 +24,5 @@ __all__ = [
     "SpeakerVerificationService",
     "SrtFormatter",
     "capture_video_subtitles",
+    "GenderSrtSplitter",
 ]

@@ -536,6 +536,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         border_width: int = 3,
         video_info: dict = None,
         dubbed_audio_path: str = None,
+        bg_music_path: str = None,
+        audio_tracks: list = None,
         audio_settings: dict = None,
         burn_cc: bool = True,
         codec: str = "hevc",
@@ -700,6 +702,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 dub_in_idx = next_in_idx
                 next_in_idx += 1
 
+            # Multi-Track BGM / Dropped MP3 Soundtrack
+            bg_music_path = bg_music_path or (audio_settings.get("bg_music_path") if audio_settings else None) or (audio_settings.get("bgm_path") if audio_settings else None)
+            audio_tracks = audio_tracks or (audio_settings.get("audio_tracks") if audio_settings else None) or []
+            mute_bgm = audio_settings.get("mute_bgm", False) if audio_settings else False
+            bgm_vol = float(audio_settings.get("bgm_vol", 0.50)) if audio_settings else 0.50
+
+            has_bgm = bool(bg_music_path and os.path.exists(bg_music_path) and os.path.getsize(bg_music_path) > 1000 and not mute_bgm)
+            bgm_in_idx = None
+            if has_bgm:
+                cmd.extend(["-i", bg_music_path])
+                bgm_in_idx = next_in_idx
+                next_in_idx += 1
+
+            # Additional dropped timeline audio tracks
+            track_in_indices = []
+            for trk in audio_tracks:
+                if trk.get("is_muted", False):
+                    continue
+                t_p = trk.get("path")
+                if t_p and os.path.exists(t_p) and os.path.getsize(t_p) > 1000:
+                    if has_bgm and os.path.abspath(t_p) == os.path.abspath(bg_music_path):
+                        continue
+                    cmd.extend(["-i", t_p])
+                    t_vol = float(trk.get("volume", 0.50))
+                    t_st = float(trk.get("start", 0.0))
+                    track_in_indices.append((next_in_idx, t_vol, t_st))
+                    next_in_idx += 1
+
             img_in_indices = []
             for img_p, it, is_tmp in image_inputs:
                 cmd.extend(["-i", img_p])
@@ -745,27 +775,58 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
                 fc_parts.append(f"{cur_v_label}null[vout]")
 
-            # Audio filter chain: dubbing + original mix with Studio Auto-Ducking
+            # Audio filter chain: Multi-Track Studio Mix (Video Original + Khmer Dub + BGM/MP3) with Auto-Ducking
             has_aout = False
-            temp_mixed_audio = None
             auto_ducking = audio_settings.get("auto_ducking", True) if audio_settings else True
+            bg_audio_labels = []
+
+            # 1. Video Original Sound
+            if has_video_audio and not mute_orig and orig_vol > 0.01:
+                fc_parts.append(f"[0:a]volume={orig_vol:.2f}[a_orig]")
+                bg_audio_labels.append("[a_orig]")
+
+            # 2. Background Music (MP3 / Audio File)
+            if has_bgm and bgm_vol > 0.01:
+                fc_parts.append(f"[{bgm_in_idx}:a]volume={bgm_vol:.2f}[a_bgm]")
+                bg_audio_labels.append("[a_bgm]")
+
+            # 3. Additional Timeline Audio Tracks
+            for trk_i, (trk_in, t_vol, t_st) in enumerate(track_in_indices):
+                lbl = f"[a_trk_{trk_i}]"
+                if t_st > 0.02:
+                    fc_parts.append(f"[{trk_in}:a]adelay={int(t_st*1000)}|{int(t_st*1000)},volume={t_vol:.2f}{lbl}")
+                else:
+                    fc_parts.append(f"[{trk_in}:a]volume={t_vol:.2f}{lbl}")
+                bg_audio_labels.append(lbl)
+
+            # 4. Mix with Khmer Dubbing
             if has_dub:
-                if has_video_audio and not mute_orig and orig_vol > 0.01:
-                    fc_parts.append(f"[0:a]volume={orig_vol:.2f}[a_orig]")
-                    fc_parts.append(f"[{dub_in_idx}:a]volume={dub_vol:.2f}[a_dub]")
+                fc_parts.append(f"[{dub_in_idx}:a]volume={dub_vol:.2f}[a_dub]")
+                if bg_audio_labels:
+                    if len(bg_audio_labels) > 1:
+                        bg_inputs = "".join(bg_audio_labels)
+                        fc_parts.append(f"{bg_inputs}amix=inputs={len(bg_audio_labels)}:duration=first:dropout_transition=0:normalize=0[a_bg_comb]")
+                        master_bg_label = "[a_bg_comb]"
+                    else:
+                        master_bg_label = bg_audio_labels[0]
+
                     if auto_ducking:
                         fc_parts.append(f"[a_dub]asplit=2[dub_sc][dub_mix]")
-                        fc_parts.append(f"[a_orig][dub_sc]sidechaincompress=threshold=0.01:ratio=20:attack=10:release=250[a_orig_ducked]")
-                        fc_parts.append(f"[a_orig_ducked][dub_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+                        fc_parts.append(f"{master_bg_label}[dub_sc]sidechaincompress=threshold=0.01:ratio=20:attack=10:release=250[a_bg_ducked]")
+                        fc_parts.append(f"[a_bg_ducked][dub_mix]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
                     else:
-                        fc_parts.append(f"[a_orig][a_dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+                        fc_parts.append(f"{master_bg_label}[a_dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
                     has_aout = True
                 else:
-                    fc_parts.append(f"[{dub_in_idx}:a]volume={dub_vol:.2f}[aout]")
+                    fc_parts.append(f"[a_dub]anull[aout]")
                     has_aout = True
-            elif has_video_audio and not mute_orig:
-                if abs(orig_vol - 1.0) > 0.01:
-                    fc_parts.append(f"[0:a]volume={orig_vol:.2f}[aout]")
+            elif bg_audio_labels:
+                if len(bg_audio_labels) > 1:
+                    bg_inputs = "".join(bg_audio_labels)
+                    fc_parts.append(f"{bg_inputs}amix=inputs={len(bg_audio_labels)}:duration=first:dropout_transition=0:normalize=0[aout]")
+                    has_aout = True
+                else:
+                    fc_parts.append(f"{bg_audio_labels[0]}anull[aout]")
                     has_aout = True
 
             enc_name, enc_flags, enc_label = get_fastest_video_encoder(codec=codec)
@@ -955,11 +1016,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     audio_stream_sources.append((input_idx, vol, "custom"))
                     input_idx += 1
 
+            # Guarantee original video sound is included if present and not muted
+            has_orig_stream = any(t[2] == "original" for t in audio_stream_sources)
+            if not has_orig_stream and not audio_settings.get("mute_orig", False):
+                orig_vol = float(audio_settings.get("orig_vol", 0.85))
+                audio_stream_sources.append((vid_in_idx, orig_vol, "original"))
+
             # Guarantee dubbed audio is included if present
             has_dub_stream = any(t[2] == "dub" for t in audio_stream_sources)
             if not has_dub_stream and dubbed_audio_path and os.path.exists(dubbed_audio_path) and not audio_settings.get("mute_dub", False):
                 cmd.extend(["-i", dubbed_audio_path])
                 audio_stream_sources.append((input_idx, audio_settings.get("dub_vol", 1.0), "dub"))
+                input_idx += 1
+
+            # Guarantee BGM audio is included if present
+            has_bgm_stream = any(t[2] == "bgm" for t in audio_stream_sources)
+            if not has_bgm_stream and bg_music_path and os.path.exists(bg_music_path) and not audio_settings.get("mute_bgm", False):
+                cmd.extend(["-i", bg_music_path])
+                audio_stream_sources.append((input_idx, audio_settings.get("bgm_vol", 0.50), "bgm"))
                 input_idx += 1
         else:
             # Legacy audio_settings mapping

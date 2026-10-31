@@ -131,9 +131,22 @@ class ExportDialog(QDialog):
         v_qual.addWidget(self.combo_quality)
         exp_layout.addLayout(v_qual)
 
+        # 5. Modern Video Export Speed Control (0.5x - 2.0x)
+        from ui_v_PyQt6.components.player.speed_control_widget import ModernSpeedControlWidget
+        v_speed = QVBoxLayout()
+        v_speed.setSpacing(6)
+        lbl_speed_title = QLabel("Video Export Speed (ល្បឿននាំចេញវីដេអូ):")
+        lbl_speed_title.setStyleSheet("color: #e2e8f0; font-size: 11px; font-weight: 600;")
+        v_speed.addWidget(lbl_speed_title)
+
+        init_speed = float(self._initial.get("speed", 1.0) or 1.0)
+        self.speed_widget = ModernSpeedControlWidget(current_speed=init_speed, parent=self, show_handle=False)
+        v_speed.addWidget(self.speed_widget)
+        exp_layout.addLayout(v_speed)
+
         self.combo_target.currentTextChanged.connect(self._on_target_mode_changed)
 
-        # 5. ONLY ONE HERO ACTION BUTTON!
+        # 6. ONLY ONE HERO ACTION BUTTON!
         self.btn_export_now = QPushButton("🚀 EXPORT NOW")
         self.btn_export_now.setFixedHeight(40)
         self.btn_export_now.setStyleSheet("""
@@ -187,7 +200,8 @@ class ExportDialog(QDialog):
             "fps": self.combo_fps.currentText(),
             "format": chosen_fmt,
             "codec": codec_info.get("codec", "hevc"),
-            "crf": crf
+            "crf": crf,
+            "speed": self.speed_widget.get_speed() if hasattr(self, "speed_widget") else 1.0
         }
 
     def _on_target_mode_changed(self, text: str):
@@ -389,7 +403,10 @@ class DubbingExportView(QWidget):
 
         # Tabbed Inspector to separate Voice Cast, Audio Mix, Voice Sync, and Export
         self.tab_widget = QTabWidget()
+        self.tab_widget.setMovable(True)
         self.tab_widget.setDocumentMode(True)
+        if hasattr(self.tab_widget, 'tabBar') and self.tab_widget.tabBar():
+            self.tab_widget.tabBar().setMovable(True)
         self.tab_widget.setStyleSheet("""
             QTabWidget::pane {
                 border: 1px solid #232b3b;
@@ -776,7 +793,7 @@ class DubbingExportView(QWidget):
         dub_layout.addWidget(self.slider_dub_vol)
         ca_layout.addWidget(dub_box)
 
-        # 1.3 Background Music (BGM) Track Strip
+        # 1.3 Background Music (BGM / MP3) Track Strip
         bgm_box = QFrame()
         bgm_box.setStyleSheet("background-color: #141720; border: 1px solid #232a38; border-radius: 7px;")
         bgm_layout = QVBoxLayout(bgm_box)
@@ -784,14 +801,40 @@ class DubbingExportView(QWidget):
         bgm_layout.setSpacing(4)
 
         bgm_top = QHBoxLayout()
-        lbl_bgm = QLabel("🎵 BGM Music:")
+        lbl_bgm = QLabel("🎵 BGM / MP3 Music:")
         lbl_bgm.setStyleSheet("font-weight: 600; color: #e2e8f0; font-size: 11px;")
         bgm_top.addWidget(lbl_bgm)
         bgm_top.addStretch()
 
-        self.lbl_bgm_vol = QLabel("35%")
+        self.lbl_bgm_vol = QLabel("50%")
         self.lbl_bgm_vol.setStyleSheet("background-color: #452907; color: #fbbf24; border: 1px solid #d97706; border-radius: 3px; padding: 1px 6px; font-weight: bold; font-size: 10px;")
         bgm_top.addWidget(self.lbl_bgm_vol)
+
+        self.check_mute_bgm = QCheckBox("Mute")
+        self.check_mute_bgm.setStyleSheet("""
+            QCheckBox {
+                color: #94a3b8;
+                font-size: 10px;
+                font-weight: 600;
+                spacing: 4px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border: 1px solid #3b4559;
+                background-color: #161b24;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #ef4444;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #dc2626;
+                border-color: #f87171;
+            }
+        """)
+        self.check_mute_bgm.stateChanged.connect(self._emit_audio_mix)
+        bgm_top.addWidget(self.check_mute_bgm)
 
         btn_bgm = QPushButton(" Browse...")
         btn_bgm.setIcon(get_qta_icon("fa5s.folder-open", color="#fbbf24"))
@@ -815,13 +858,58 @@ class DubbingExportView(QWidget):
         bgm_top.addWidget(btn_bgm)
         bgm_layout.addLayout(bgm_top)
 
+        # File path indicator
+        self.lbl_bgm_file = QLabel("No MP3 loaded (Drop MP3 on Timeline or Browse)")
+        self.lbl_bgm_file.setStyleSheet("color: #64748b; font-size: 10px; font-style: italic;")
+        bgm_layout.addWidget(self.lbl_bgm_file)
+
         self.slider_bgm_vol = QSlider(Qt.Orientation.Horizontal)
-        self.slider_bgm_vol.setRange(0, 100)
-        self.slider_bgm_vol.setValue(35)
+        self.slider_bgm_vol.setRange(0, 200)
+        self.slider_bgm_vol.setValue(50)
         self.slider_bgm_vol.setStyleSheet(_make_modern_slider_qss("#d97706", "#f59e0b", "#fbbf24"))
         self.slider_bgm_vol.valueChanged.connect(lambda v: self.lbl_bgm_vol.setText(f"{v}%"))
         self.slider_bgm_vol.valueChanged.connect(self._emit_audio_mix)
         bgm_layout.addWidget(self.slider_bgm_vol)
+
+        # Presets row: 25%, 50%, 75%, 100% + Relative Mix buttons
+        row_presets = QHBoxLayout()
+        row_presets.setSpacing(4)
+        preset_btn_qss = """
+            QPushButton {
+                background-color: #1e2430;
+                color: #cbd5e1;
+                border: 1px solid #334155;
+                border-radius: 3px;
+                padding: 1px 4px;
+                font-size: 9px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #d97706;
+                color: #ffffff;
+                border-color: #fbbf24;
+            }
+        """
+        for p_val in [25, 50, 75, 100]:
+            btn_p = QPushButton(f"{p_val}%")
+            btn_p.setStyleSheet(preset_btn_qss)
+            btn_p.clicked.connect(lambda checked=False, v=p_val: self.slider_bgm_vol.setValue(v))
+            row_presets.addWidget(btn_p)
+
+        # Relative Mix Buttons (50% of Video, 50% of Dub)
+        btn_rel_vid = QPushButton("⚡ 50% Video")
+        btn_rel_vid.setToolTip("កំណត់ MP3 ស្មើ 50% នៃសំឡេង Video ដើម")
+        btn_rel_vid.setStyleSheet(preset_btn_qss.replace("#1e2430", "#142638").replace("#334155", "#0284c7").replace("#cbd5e1", "#38bdf8"))
+        btn_rel_vid.clicked.connect(self._set_bgm_50_pct_of_video)
+        row_presets.addWidget(btn_rel_vid)
+
+        btn_rel_dub = QPushButton("⚡ 50% Dub")
+        btn_rel_dub.setToolTip("កំណត់ MP3 ស្មើ 50% នៃសំឡេង Khmer Dub Voiceover")
+        btn_rel_dub.setStyleSheet(preset_btn_qss.replace("#1e2430", "#26163d").replace("#334155", "#7c3aed").replace("#cbd5e1", "#c084fc"))
+        btn_rel_dub.clicked.connect(self._set_bgm_50_pct_of_dub)
+        row_presets.addWidget(btn_rel_dub)
+
+        bgm_layout.addLayout(row_presets)
         ca_layout.addWidget(bgm_box)
 
         self.check_auto_duck = QCheckBox("Auto Ducking (បន្ថយសំឡេងដើមស្វ័យប្រវត្តិ)")
@@ -1345,6 +1433,33 @@ class DubbingExportView(QWidget):
         if self.on_export_video_no_cc:
             self.on_export_video_no_cc(codec=real_codec, crf=real_crf)
 
+    def _set_bgm_50_pct_of_video(self):
+        v = max(1, int(self.slider_orig_vol.value() * 0.50))
+        self.slider_bgm_vol.setValue(v)
+
+    def _set_bgm_50_pct_of_dub(self):
+        v = max(1, int(self.slider_dub_vol.value() * 0.50))
+        self.slider_bgm_vol.setValue(v)
+
+    def set_bgm_file(self, file_path: str, vol_pct: int = None):
+        """Sets the active background music MP3 file and updates UI badge & slider."""
+        if not file_path:
+            self.bgm_path = None
+            if hasattr(self, 'lbl_bgm_file'):
+                self.lbl_bgm_file.setText("No MP3 loaded (Drop MP3 on Timeline or Browse)")
+                self.lbl_bgm_file.setStyleSheet("color: #64748b; font-size: 10px; font-style: italic;")
+            self._emit_audio_mix()
+            return
+
+        self.bgm_path = file_path
+        fn = os.path.basename(file_path)
+        if hasattr(self, 'lbl_bgm_file'):
+            self.lbl_bgm_file.setText(f"🎵 {fn}")
+            self.lbl_bgm_file.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+        if hasattr(self, 'slider_bgm_vol') and vol_pct is not None:
+            self.slider_bgm_vol.setValue(int(vol_pct))
+        self._emit_audio_mix()
+
     def _emit_audio_mix(self):
         if self.on_audio_mix_change:
             settings = {
@@ -1353,6 +1468,8 @@ class DubbingExportView(QWidget):
                 "dub_vol": self.slider_dub_vol.value() / 100.0,
                 "mute_dub": self.check_mute_dub.isChecked(),
                 "bgm_vol": self.slider_bgm_vol.value() / 100.0,
+                "mute_bgm": self.check_mute_bgm.isChecked() if hasattr(self, "check_mute_bgm") else False,
+                "bgm_path": self.bgm_path,
                 "auto_duck": self.check_auto_duck.isChecked()
             }
             self.on_audio_mix_change(settings)
@@ -1373,7 +1490,7 @@ class DubbingExportView(QWidget):
     def _browse_bgm(self):
         f, _ = QFileDialog.getOpenFileName(self, "Select Background Music", "", "Audio Files (*.mp3 *.wav *.aac *.m4a)")
         if f:
-            self.bgm_path = f
+            self.set_bgm_file(f, vol_pct=self.slider_bgm_vol.value())
             if self.on_bg_music_browse:
                 self.on_bg_music_browse(f)
 

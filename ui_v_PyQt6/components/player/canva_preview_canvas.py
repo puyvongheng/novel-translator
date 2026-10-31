@@ -18,9 +18,9 @@ import numpy as np
 from ui_v_PyQt6.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
     QComboBox, QFrame, QGroupBox, QMenu, QFileDialog, QInputDialog,
-    Qt, QColor, QFont, QPen, QBrush, QPointF, QRectF, QTransform,
+    Qt, QColor, QFont, QPen, QBrush, QPoint, QPointF, QRect, QRectF, QTransform,
     QPainter, QImage, QPixmap, QPainterPath, QCursor, QToolTip,
-    Signal, QKeySequence, QShortcut
+    Signal, QKeySequence, QShortcut, QTimer, QLinearGradient, QRadialGradient
 )
 from ui_v_PyQt6.components.player.canvas_item import CanvasItem
 from ui_v_PyQt6.components.player.guide_dialogs import NewGuideDialog, NewGuideLayoutDialog
@@ -38,8 +38,10 @@ class CanvaPreviewCanvas(QWidget):
     item_added = Signal(object)
     item_deleted = Signal(object)
     canvas_modified = Signal()
+    video_selected = Signal(str)
     video_dropped = Signal(str)
     subtitle_dropped = Signal(str)
+    audio_dropped = Signal(str)
     lut_dropped = Signal(str)
     resolution_changed = Signal(int, int, str)
     crop_offset_changed = Signal(float, float)   # (ox, oy)
@@ -80,7 +82,7 @@ class CanvaPreviewCanvas(QWidget):
         self.is_transform_mode = False  # Video framing can ONLY be dragged when Transform tool is active!
         self.zoom_level = 1.0  # 1.0 = Fit to preview container
         self.show_grid = False
-        self.show_rulers = True
+        self.show_rulers = False  # Default hidden (Toggle 4-Corner Guides & Rulers off by default)
         self.enable_snapping = True
 
         # Photoshop CC Guides & Rulers System
@@ -149,7 +151,74 @@ class CanvaPreviewCanvas(QWidget):
         self.reframe_crop_w = 607
         self.reframe_crop_h = 1080
 
+        # Drag & Drop Animated Dropzone & Ripple State
+        self._is_drag_hovering = False
+        self._drag_target_type = "video"
+        self._drag_pulse_phase = 0.0
+        self._drag_pulse_timer = QTimer(self)
+        self._drag_pulse_timer.setInterval(25)
+        self._drag_pulse_timer.timeout.connect(self._on_drag_pulse_tick)
+
+        self._drop_ripple_pos = None
+        self._drop_ripple_radius = 0.0
+        self._drop_ripple_opacity = 0.0
+        self._drop_ripple_timer = QTimer(self)
+        self._drop_ripple_timer.setInterval(16)
+        self._drop_ripple_timer.timeout.connect(self._on_drop_ripple_tick)
+
         self._setup_shortcuts()
+
+    def _on_drag_pulse_tick(self):
+        """Ticks the pulse animation phase while dragging media over the canvas."""
+        self._drag_pulse_phase = (self._drag_pulse_phase + 0.10) % (2.0 * math.pi)
+        self.update()
+
+    def _on_drop_ripple_tick(self):
+        """Ticks smooth ripple wave expansion and fade-out upon dropping a file."""
+        self._drop_ripple_radius += 16.0
+        self._drop_ripple_opacity -= 0.045
+        if self._drop_ripple_opacity <= 0.0:
+            self._drop_ripple_opacity = 0.0
+            self._drop_ripple_pos = None
+            self._drop_ripple_timer.stop()
+        self.update()
+
+    def set_video_dimensions(self, w: int, h: int, auto_fit: bool = True):
+        """
+        Updates video native dimensions and automatically calculates the matching
+        aspect ratio mode (16:9, 9:16, 1:1, 4:5, 21:9, or fit) to eliminate black bars.
+        """
+        w = max(10, int(w))
+        h = max(10, int(h))
+        self.video_native_w = w
+        self.video_native_h = h
+
+        if auto_fit:
+            ratio = w / float(h)
+            if abs(ratio - (16.0 / 9.0)) < 0.06:
+                detected_mode = "16:9"
+            elif abs(ratio - (9.0 / 16.0)) < 0.06:
+                detected_mode = "9:16"
+            elif abs(ratio - 1.0) < 0.06:
+                detected_mode = "1:1"
+            elif abs(ratio - (4.0 / 5.0)) < 0.06:
+                detected_mode = "4:5"
+            elif abs(ratio - (21.0 / 9.0)) < 0.10:
+                detected_mode = "21:9"
+            else:
+                detected_mode = "fit"
+
+            self.aspect_ratio_mode = detected_mode
+            self.video_fit_mode = "fill"
+            self.video_scale = 1.0
+            self.crop_offset_x = 0.0
+            self.crop_offset_y = 0.0
+            self.zoom_level = 1.0
+
+        w_cur, h_cur = self.get_current_canvas_resolution()
+        lbl = self.get_aspect_ratio_label()
+        self.resolution_changed.emit(w_cur, h_cur, lbl)
+        self.update()
 
     # ------------------ ASPECT RATIO, SIZING & GEOMETRY ------------------
     def set_aspect_ratio(self, mode: str):
@@ -663,16 +732,20 @@ class CanvaPreviewCanvas(QWidget):
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         self._processed_frame_pixmap = QPixmap.fromImage(qimg)
 
-        # Ultra-fast blurred background for Fit/Blur mode
-        try:
-            small_w = max(16, w // 16)
-            small_h = max(16, h // 16)
-            small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-            small_blur = cv2.GaussianBlur(small, (15, 15), 0)
-            small_rgb = cv2.cvtColor(small_blur, cv2.COLOR_BGR2RGB)
-            qimg_blur = QImage(small_rgb.data, small_w, small_h, ch * small_w, QImage.Format.Format_RGB888)
-            self._blurred_frame_pixmap = QPixmap.fromImage(qimg_blur)
-        except Exception:
+        # Ultra-fast blurred background ONLY when Fit/Blur mode is active
+        fit_mode = getattr(self, "video_fit_mode", "fill")
+        if fit_mode == "fit":
+            try:
+                small_w = max(16, w // 16)
+                small_h = max(16, h // 16)
+                small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                small_blur = cv2.GaussianBlur(small, (15, 15), 0)
+                small_rgb = cv2.cvtColor(small_blur, cv2.COLOR_BGR2RGB)
+                qimg_blur = QImage(small_rgb.data, small_w, small_h, ch * small_w, QImage.Format.Format_RGB888)
+                self._blurred_frame_pixmap = QPixmap.fromImage(qimg_blur)
+            except Exception:
+                self._blurred_frame_pixmap = None
+        else:
             self._blurred_frame_pixmap = None
 
     def set_color_preset(self, preset_id: str, intensity: float = 0.80):
@@ -710,15 +783,63 @@ class CanvaPreviewCanvas(QWidget):
     # ------------------ DRAG AND DROP (CANVA STYLE) ------------------
     def dragEnterEvent(self, event):
         """Accepts Video, Subtitle (CC), LUT, Sticker, Image files, and text dropped onto the monitor."""
-        if event.mimeData().hasUrls() or event.mimeData().hasText():
+        if event.mimeData().hasUrls():
+            has_video = False
+            has_sub = False
+            for url in event.mimeData().urls():
+                fpath = url.toLocalFile().lower()
+                if fpath.endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".ts", ".wmv", ".m4v")):
+                    has_video = True
+                    break
+                elif fpath.endswith((".srt", ".vtt", ".ass", ".ssa", ".sub", ".txt")):
+                    has_sub = True
+                    break
+            if has_video:
+                self._drag_target_type = "video"
+            elif has_sub:
+                self._drag_target_type = "subtitle"
+            else:
+                self._drag_target_type = "media"
+            self._is_drag_hovering = True
+            if not self._drag_pulse_timer.isActive():
+                self._drag_pulse_timer.start()
             event.acceptProposedAction()
+            self.update()
+        elif event.mimeData().hasText():
+            self._drag_target_type = "text"
+            self._is_drag_hovering = True
+            if not self._drag_pulse_timer.isActive():
+                self._drag_pulse_timer.start()
+            event.acceptProposedAction()
+            self.update()
+        else:
+            event.ignore()
 
     def dragMoveEvent(self, event):
-        event.acceptProposedAction()
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
+            self._is_drag_hovering = True
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._is_drag_hovering = False
+        self._drag_pulse_timer.stop()
+        self.update()
 
     def dropEvent(self, event):
         """Drops Video, Sticker, LUT, Image, Subtitle (CC), or Text directly onto the canvas."""
-        norm_pos = self.widget_to_normalized(event.position())
+        self._is_drag_hovering = False
+        self._drag_pulse_timer.stop()
+
+        # Trigger smooth glowing ripple animation starting at drop position
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        self._drop_ripple_pos = QPointF(pos.x(), pos.y())
+        self._drop_ripple_radius = 16.0
+        self._drop_ripple_opacity = 0.92
+        self._drop_ripple_timer.start()
+
+        norm_pos = self.widget_to_normalized(self._drop_ripple_pos)
         added_any = False
 
         if event.mimeData().hasUrls():
@@ -728,17 +849,24 @@ class CanvaPreviewCanvas(QWidget):
                     continue
                 fpath_lower = fpath.lower()
 
-                # 1. Video Drop (loads video in player and timeline, OR adds as Picture-in-Picture Video Overlay)
+                # 1. Video Drop (loads video in player and timeline; if Alt held, adds as PIP overlay)
                 if fpath_lower.endswith((".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".ts", ".wmv", ".m4v")):
-                    if self._current_frame_bgr is None and getattr(self, "duration", 0.0) <= 0:
-                        self.video_dropped.emit(fpath)
-                    else:
+                    from ui_v_PyQt6.qt_compat import QApplication
+                    modifiers = QApplication.keyboardModifiers()
+                    if (modifiers & Qt.KeyboardModifier.AltModifier) and self._current_frame_bgr is not None:
                         self.add_video_item(fpath, norm_pos=norm_pos)
+                    else:
+                        self.video_dropped.emit(fpath)
                     added_any = True
 
                 # 2. Subtitle (CC) Drop (loads SRT/VTT/ASS in studio)
                 elif fpath_lower.endswith((".srt", ".vtt", ".ass", ".ssa", ".sub")):
                     self.subtitle_dropped.emit(fpath)
+                    added_any = True
+
+                # 2b. Audio Drop (loads MP3, WAV, etc. directly into timeline)
+                elif fpath_lower.endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")):
+                    self.audio_dropped.emit(fpath)
                     added_any = True
 
                 # 3. LUT Color Grading Drop (.cube, .3dl)
@@ -1460,6 +1588,7 @@ class CanvaPreviewCanvas(QWidget):
                     # Normal mode: Deselect all items, do NOT pan or drag video background!
                     self.selected_items = []
                     self.item_selected.emit(None)
+                    self.video_selected.emit(getattr(self, "video_path", "") or "")
                     self._interaction_mode = None
                     self.setCursor(Qt.CursorShape.ArrowCursor)
 
@@ -1904,8 +2033,13 @@ class CanvaPreviewCanvas(QWidget):
             act_star.triggered.connect(lambda: self.add_shape_item("star", "#f59e0b", norm_pos=norm_pos))
             menu.addSeparator()
             act_grid = menu.addAction("Toggle Grid Overlay")
+            act_grid.setCheckable(True)
+            act_grid.setChecked(self.show_grid)
             act_grid.triggered.connect(self.toggle_grid)
+
             act_rulers = menu.addAction("Toggle 4-Corner Guides")
+            act_rulers.setCheckable(True)
+            act_rulers.setChecked(self.show_rulers)
             act_rulers.triggered.connect(self.toggle_rulers)
 
         # --- Photoshop CC Guides System ---
@@ -1937,19 +2071,6 @@ class CanvaPreviewCanvas(QWidget):
         act_show_guides.triggered.connect(self.toggle_guides)
 
         menu.exec(QCursor.pos())
-
-    # ------------------ DRAG & DROP INGESTION ------------------
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
 
     def toggle_grid(self):
         self.show_grid = not self.show_grid
@@ -2087,23 +2208,29 @@ class CanvaPreviewCanvas(QWidget):
         cur_t = getattr(self, "current_time", 0.0)
         dur = getattr(self, "duration", 0.0)
         sub_item = getattr(self, "_subtitle_item", None)
-        is_playing = bool(getattr(self.parent(), "is_playing", False))
+        is_playing = bool(
+            (hasattr(self, "player") and getattr(self.player, "is_playing", False)) or
+            (self.parent() and getattr(self.parent(), "is_playing", False))
+        )
         for it in sorted(self.items, key=lambda x: x.z_index):
             # CC Subtitle has its own state; overlay items ONLY render when current time is within start_time -> end_time
-            if it is sub_item:
-                it.render(
-                    painter, cw, ch,
-                    is_selected=(it in self.selected_items and not is_playing),
-                    bg_pixmap=self._processed_frame_pixmap,
-                    current_time=cur_t
-                )
-            elif it.is_active_at(cur_t, dur):
-                it.render(
-                    painter, cw, ch,
-                    is_selected=(it in self.selected_items and not is_playing),
-                    bg_pixmap=self._processed_frame_pixmap,
-                    current_time=cur_t
-                )
+            try:
+                if it is sub_item:
+                    it.render(
+                        painter, cw, ch,
+                        is_selected=(it in self.selected_items and not is_playing),
+                        bg_pixmap=self._processed_frame_pixmap,
+                        current_time=cur_t
+                    )
+                elif it.is_active_at(cur_t, dur):
+                    it.render(
+                        painter, cw, ch,
+                        is_selected=(it in self.selected_items and not is_playing),
+                        bg_pixmap=self._processed_frame_pixmap,
+                        current_time=cur_t
+                    )
+            except Exception:
+                pass
 
         painter.restore()
 
@@ -2131,24 +2258,226 @@ class CanvaPreviewCanvas(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(canvas_rect)
 
-        # 7. Snapping Guide Lines (Magenta / Cyan)
-        self._render_snap_guides(painter)
+            # 7. Snapping Guide Lines (Magenta / Cyan) only when editing
+            self._render_snap_guides(painter)
 
-        # 8. Marquee Selection Box
-        if self._marquee_rect:
-            painter.setPen(QPen(QColor("#0ea5e9"), 1, Qt.PenStyle.DashLine))
-            painter.setBrush(QBrush(QColor(14, 165, 233, 40)))
-            painter.drawRect(self._marquee_rect)
+            # 8. Marquee Selection Box
+            if self._marquee_rect:
+                painter.setPen(QPen(QColor("#0ea5e9"), 1, Qt.PenStyle.DashLine))
+                painter.setBrush(QBrush(QColor(14, 165, 233, 40)))
+                painter.drawRect(self._marquee_rect)
 
-        # 8b. Photoshop CC User Guides (Cyan #00e5ff) & Dragging Overlay
-        if self.show_guides:
-            self._render_user_guides(painter, canvas_rect)
+            # 8b. Photoshop CC User Guides (Cyan #00e5ff) & Dragging Overlay
+            if self.show_guides:
+                self._render_user_guides(painter, canvas_rect)
 
         # 9. Optional Rulers on top & left
         if self.show_rulers:
             self._render_rulers(painter, canvas_rect)
 
-        # 10. Transform Mode Active Overlay & Badge
+        # 10. Drag & Drop Animated Glassmorphism Dropzone Overlay
+        if getattr(self, "_is_drag_hovering", False):
+            self._render_drag_drop_overlay(painter, canvas_rect)
+
+        # 11. Dropped Video Ripple Wave Animation
+        if getattr(self, "_drop_ripple_pos", None) is not None and getattr(self, "_drop_ripple_opacity", 0.0) > 0.0:
+            self._render_drop_ripple(painter)
+
+    def _render_drag_drop_overlay(self, painter: QPainter, canvas_rect: QRectF):
+        """
+        Renders a sleek, colorful animated glassmorphism dropzone with glowing borders,
+        pulsing circular badge, colorful video camera icon, and bilingual typography.
+        """
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 1. Dark Glassmorphism Frosted Workspace Dimmer
+        painter.fillRect(self.rect(), QColor(10, 15, 26, 215))
+
+        # 2. Glowing Animated Boundary around Canvas
+        phase = getattr(self, "_drag_pulse_phase", 0.0)
+        pulse = (math.sin(phase) + 1.0) / 2.0  # 0.0 to 1.0
+        
+        glow_pen_w = 2.5 + pulse * 1.5
+        border_rect = canvas_rect.adjusted(6, 6, -6, -6)
+        if border_rect.width() < 50 or border_rect.height() < 50:
+            border_rect = canvas_rect
+
+        # Gradient for border: Cyan -> Indigo -> Fuchsia
+        grad_border = QLinearGradient(border_rect.topLeft(), border_rect.bottomRight())
+        grad_border.setColorAt(0.0, QColor("#38bdf8"))
+        grad_border.setColorAt(0.5, QColor("#818cf8"))
+        grad_border.setColorAt(1.0, QColor("#ec4899"))
+
+        # Inner highlight fill (subtle radial light)
+        grad_fill = QRadialGradient(border_rect.center(), max(border_rect.width(), border_rect.height()) / 1.5)
+        grad_fill.setColorAt(0.0, QColor(56, 189, 248, int(28 + pulse * 22)))
+        grad_fill.setColorAt(0.6, QColor(99, 102, 241, int(16 + pulse * 12)))
+        grad_fill.setColorAt(1.0, QColor(15, 23, 42, 70))
+
+        painter.setPen(QPen(QBrush(grad_border), glow_pen_w, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(QBrush(grad_fill))
+        painter.drawRoundedRect(border_rect, 16.0, 16.0)
+
+        cx = border_rect.center().x()
+        cy = border_rect.center().y() - 25.0
+
+        # 3. Pulsing Halo around Center Icon
+        halo_r = 44.0 + pulse * 12.0
+        halo_grad = QRadialGradient(QPointF(cx, cy), halo_r)
+        halo_grad.setColorAt(0.0, QColor(56, 189, 248, int(160 * (1.0 - pulse * 0.4))))
+        halo_grad.setColorAt(0.6, QColor(129, 140, 248, int(80 * (1.0 - pulse * 0.4))))
+        halo_grad.setColorAt(1.0, QColor(129, 140, 248, 0))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(halo_grad))
+        painter.drawEllipse(QPointF(cx, cy), halo_r, halo_r)
+
+        # 4. Circular Badge Background (Vibrant Electric Indigo to Cyan Gradient)
+        badge_r = 34.0
+        badge_grad = QLinearGradient(cx - badge_r, cy - badge_r, cx + badge_r, cy + badge_r)
+        badge_grad.setColorAt(0.0, QColor("#2563eb"))
+        badge_grad.setColorAt(0.5, QColor("#6366f1"))
+        badge_grad.setColorAt(1.0, QColor("#06b6d4"))
+
+        painter.setPen(QPen(QColor("#ffffff"), 2.0))
+        painter.setBrush(QBrush(badge_grad))
+        painter.drawEllipse(QPointF(cx, cy), badge_r, badge_r)
+
+        # 5. Icon in Badge (Video Camera OR Subtitle CC bubble OR Media)
+        drag_type = getattr(self, "_drag_target_type", "video")
+        if drag_type == "subtitle":
+            bubble_w = 30.0
+            bubble_h = 20.0
+            bubble_x = cx - 15.0
+            bubble_y = cy - 11.0
+            
+            b_path = QPainterPath()
+            b_path.addRoundedRect(QRectF(bubble_x, bubble_y, bubble_w, bubble_h), 5.0, 5.0)
+            b_path.moveTo(bubble_x + 6.0, bubble_y + bubble_h)
+            b_path.lineTo(bubble_x + 3.0, bubble_y + bubble_h + 5.0)
+            b_path.lineTo(bubble_x + 11.0, bubble_y + bubble_h)
+            b_path.closeSubpath()
+            
+            painter.setPen(QPen(QColor("#ffffff"), 1.8))
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawPath(b_path)
+            
+            painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            painter.setPen(QColor("#0284c7"))
+            painter.drawText(QRectF(bubble_x, bubble_y, bubble_w, bubble_h), Qt.AlignmentFlag.AlignCenter, "CC")
+
+            title_text = "📥 Drop Subtitle (SRT) Here (ទម្លាក់ឯកសារ SRT ទីនេះ)"
+            feature_text = "✨ Auto-Sync Subtitles • បញ្ចូលអត្ថបទ SRT ស្វ័យប្រវត្តិ"
+            hint_text = "📄 Supports .SRT • .VTT • .ASS • .SSA • .TXT Dialogue Files"
+        elif drag_type == "video":
+            cam_w = 26.0
+            cam_h = 18.0
+            cam_x = cx - 16.0
+            cam_y = cy - (cam_h / 2.0)
+
+            painter.setPen(QPen(QColor("#ffffff"), 1.8))
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawRoundedRect(QRectF(cam_x, cam_y, cam_w, cam_h), 4.0, 4.0)
+
+            lens_path = QPainterPath()
+            lens_path.moveTo(cam_x + cam_w, cy - 5.0)
+            lens_path.lineTo(cam_x + cam_w + 10.0, cy - 9.0)
+            lens_path.lineTo(cam_x + cam_w + 10.0, cy + 9.0)
+            lens_path.lineTo(cam_x + cam_w, cy + 5.0)
+            lens_path.closeSubpath()
+            painter.drawPath(lens_path)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#0284c7"))
+            painter.drawEllipse(QPointF(cam_x + (cam_w / 2.0), cy), 4.5, 4.5)
+            painter.setBrush(QColor("#38bdf8"))
+            painter.drawEllipse(QPointF(cam_x + (cam_w / 2.0) - 1.0, cy - 1.0), 2.0, 2.0)
+
+            title_text = "📥 Drop Video Here (ទម្លាក់វីដេអូនោះទីនេះ)"
+            feature_text = "✨ Auto-Fit Aspect Ratio • ស្គាល់ទំហំ & Resize ស្វ័យប្រវត្តិ"
+            hint_text = "🎬 16:9 Cinema • 9:16 TikTok / Shorts • 1:1 Square • Native Resolution"
+        else:
+            painter.setFont(QFont("Segoe UI", 20))
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(QRectF(cx - 20, cy - 20, 40, 40), Qt.AlignmentFlag.AlignCenter, "📁")
+            title_text = "📥 Drop Media File Here (ទម្លាក់ឯកសារទីនេះ)"
+            feature_text = "✨ Add to Project & Canvas Overlays"
+            hint_text = "🖼️ Images • 🎨 Stickers • 🎵 Audio • 🎬 Media"
+        
+        # Drop shadow for text
+        painter.setFont(QFont("Kantumruy Pro", 15, QFont.Weight.Bold))
+        painter.setPen(QColor(0, 0, 0, 220))
+        painter.drawText(QRectF(border_rect.left(), cy + badge_r + 15, border_rect.width(), 32),
+                         Qt.AlignmentFlag.AlignCenter, title_text)
+        # Main text
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(QRectF(border_rect.left(), cy + badge_r + 14, border_rect.width(), 32),
+                         Qt.AlignmentFlag.AlignCenter, title_text)
+
+        # 7. Auto-Fit Feature Pill: "✨ Auto-Fit Aspect Ratio • ស្គាល់ទំហំ & Auto-Resize"
+        feature_text = "✨ Auto-Fit Aspect Ratio • ស្គាល់ទំហំ & Resize ស្វ័យប្រវត្តិ"
+        font_pill = QFont("Kantumruy Pro", 11, QFont.Weight.Medium)
+        painter.setFont(font_pill)
+
+        pill_w = min(border_rect.width() - 40, 430.0)
+        pill_h = 28.0
+        pill_rect = QRectF(cx - (pill_w / 2.0), cy + badge_r + 52, pill_w, pill_h)
+
+        # Pill background
+        painter.setPen(QPen(QColor("#38bdf8"), 1.2))
+        painter.setBrush(QColor(15, 23, 42, 230))
+        painter.drawRoundedRect(pill_rect, 14.0, 14.0)
+
+        painter.setPen(QColor("#38bdf8"))
+        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, feature_text)
+
+        # 8. Aspect Ratio Hint Subtitle
+        hint_text = "🎬 16:9 Cinema • 9:16 TikTok / Shorts • 1:1 Square • Native Resolution"
+        painter.setFont(QFont("Kantumruy Pro", 9))
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(QRectF(border_rect.left(), pill_rect.bottom() + 8, border_rect.width(), 20),
+                         Qt.AlignmentFlag.AlignCenter, hint_text)
+
+        painter.restore()
+
+    def _render_drop_ripple(self, painter: QPainter):
+        """
+        Renders a smooth glowing ripple wave expanding outward from the dropped coordinates.
+        """
+        pos = getattr(self, "_drop_ripple_pos", None)
+        opacity = getattr(self, "_drop_ripple_opacity", 0.0)
+        r = getattr(self, "_drop_ripple_radius", 0.0)
+        if not pos or opacity <= 0.0 or r <= 0.0:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Outer Wave
+        alpha_outer = int(max(0.0, min(1.0, opacity)) * 255)
+        outer_pen = QPen(QColor(56, 189, 248, alpha_outer), 3.0)
+        painter.setPen(outer_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(pos, r, r)
+
+        # Inner Wave (Slightly smaller, indigo accent)
+        if r > 18.0:
+            alpha_inner = int(max(0.0, min(1.0, opacity)) * 180)
+            inner_pen = QPen(QColor(129, 140, 248, alpha_inner), 2.0)
+            painter.setPen(inner_pen)
+            painter.drawEllipse(pos, r * 0.65, r * 0.65)
+
+        # Center Radial Glow
+        glow_grad = QRadialGradient(pos, max(10.0, r * 0.8))
+        glow_grad.setColorAt(0.0, QColor(56, 189, 248, int(alpha_outer * 0.5)))
+        glow_grad.setColorAt(1.0, QColor(56, 189, 248, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(glow_grad))
+        painter.drawEllipse(pos, r * 0.8, r * 0.8)
+
+        painter.restore()
+
     def render_clean_canvas(self) -> QPixmap:
         """
         Renders a 100% clean, pristine cinematic frame of the canvas:
@@ -2581,3 +2910,4 @@ class CanvaPreviewCanvas(QWidget):
             # Bottom-Right ┘
             painter.drawLine(QPointF(cr, cb), QPointF(cr - c_len, cb))
             painter.drawLine(QPointF(cr, cb), QPointF(cr, cb - c_len))
+

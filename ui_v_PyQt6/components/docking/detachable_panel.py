@@ -10,7 +10,7 @@ Supports:
 
 from ui_v_PyQt6.qt_compat import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    Qt, QPoint, QCursor, QApplication
+    Qt, QPoint, QCursor, QApplication, QMenu, QAction, QTabWidget, QSize
 )
 from ui_v_PyQt6.icons import get_qta_icon
 
@@ -116,7 +116,17 @@ class StudioPanelHeader(QFrame):
 
         layout.addStretch()
 
-        # 3. Multi-Monitor Button (If > 1 monitor)
+        # 3. Swap Panel Layout Button
+        self.btn_swap = QPushButton()
+        self.btn_swap.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_swap.setFixedSize(22, 22)
+        if get_qta_icon:
+            self.btn_swap.setIcon(get_qta_icon("fa5s.exchange-alt", color="#38bdf8"))
+        self.btn_swap.setToolTip("ប្តូរទីតាំង Panel (Swap Layout with other panels)")
+        self.btn_swap.clicked.connect(self._open_swap_menu)
+        layout.addWidget(self.btn_swap)
+
+        # 4. Multi-Monitor Button (If > 1 monitor)
         screens = QApplication.screens()
         if len(screens) > 1:
             self.btn_screen2 = QPushButton()
@@ -128,7 +138,7 @@ class StudioPanelHeader(QFrame):
             self.btn_screen2.clicked.connect(self.wrapper.send_to_screen_2)
             layout.addWidget(self.btn_screen2)
 
-        # 4. Float / Dock button
+        # 5. Float / Dock button
         self.btn_float = QPushButton()
         self.btn_float.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_float.setFixedSize(22, 22)
@@ -137,6 +147,77 @@ class StudioPanelHeader(QFrame):
         layout.addWidget(self.btn_float)
 
         self._drag_start_pos = None
+
+    def _open_swap_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #171a22;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 12px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-family: 'Segoe UI', 'Kantumruy Pro', sans-serif;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #232b38;
+                margin: 4px 6px;
+            }
+        """)
+
+        my_key = getattr(self.wrapper, "panel_key", "")
+        cb = getattr(self.wrapper, "swap_callback", None)
+
+        targets = [
+            ("monitor", "🎬 Video Preview Monitor"),
+            ("timeline", "⏱️ Multi-Track Timeline"),
+            ("subtitles", "📝 Subtitles Dialogue Table"),
+            ("inspector", "🛠️ Inspector (Mixer & Properties)"),
+            ("logs", "📋 Diagnostic Logs"),
+        ]
+
+        has_items = False
+        for t_key, t_title in targets:
+            if t_key != my_key and cb:
+                act = menu.addAction(f"⇄ ប្តូរទីតាំងជាមួយ {t_title}")
+                act.triggered.connect(lambda checked=False, k=t_key: cb(my_key, k))
+                has_items = True
+
+        if has_items:
+            menu.addSeparator()
+
+        if cb:
+            act_pt = menu.addAction("🔄 Swap Preview ⇄ Timeline (1-Click)")
+            act_pt.triggered.connect(lambda: cb("monitor", "timeline"))
+
+            act_ps = menu.addAction("🔄 Swap Preview ⇄ Subtitles")
+            act_ps.triggered.connect(lambda: cb("monitor", "subtitles"))
+
+            act_flip = menu.addAction("🔄 Flip Horizontal (ឆ្វេង ⇄ ស្តាំ)")
+            act_flip.triggered.connect(lambda: cb("__flip__", ""))
+
+            act_pre = menu.addAction("🎬 Premiere Full Bottom Timeline")
+            act_pre.triggered.connect(lambda: cb("__premiere_bottom__", ""))
+
+            menu.addSeparator()
+            act_reset = menu.addAction("↩️ Reset Default Layout (កំណត់ទីតាំងដើម)")
+            act_reset.triggered.connect(lambda: cb("__reset__", ""))
+
+        menu.exec(QCursor.pos())
+
+    def contextMenuEvent(self, event):
+        self._open_swap_menu()
+        event.accept()
 
     def _update_float_btn(self, is_floating: bool):
         if get_qta_icon:
@@ -317,3 +398,173 @@ class DetachablePanelWrapper(QFrame):
                 self.floating_window.setGeometry(x, y, w, h)
                 self.floating_window.activateWindow()
                 self.floating_window.raise_()
+
+    def set_swap_info(self, panel_key: str, swap_callback):
+        """Sets the panel key identifier and swap callback for dynamic NLE workspace swapping."""
+        self.panel_key = panel_key
+        self.swap_callback = swap_callback
+
+
+class PhotoshopTabWidget(QTabWidget):
+    """
+    Photoshop / Premiere Pro Style Dockable & Movable Tabbed Workspace:
+    - Freely drag tabs to reorder with mouse (setMovable(True))
+    - Document mode styling for sleek dark borderless NLE look
+    - Double click tab to float into independent window
+    - Right-click context menu on tabs: Float Tab, Move Left, Move Right
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.setUsesScrollButtons(True)
+        self.setElideMode(Qt.TextElideMode.ElideRight)
+        if hasattr(self, "tabBar") and self.tabBar():
+            self.tabBar().setMovable(True)
+            self.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.tabBar().customContextMenuRequested.connect(self._on_tab_context_menu)
+            self.tabBar().tabBarDoubleClicked.connect(self._on_tab_double_clicked)
+
+        self.setStyleSheet("""
+            QTabWidget::pane {
+                border-top: 1px solid #1e2638;
+                border-left: 1px solid #1e2638;
+                border-right: none;
+                border-bottom: none;
+                background-color: #12151c;
+                margin: 0px;
+                padding: 0px;
+            }
+            QTabBar::tab {
+                background-color: #0f1218;
+                color: #94a3b8;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 6px 12px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:selected {
+                background-color: #161b25;
+                color: #38bdf8;
+                font-weight: bold;
+                border-bottom: 2px solid #38bdf8;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #1a202c;
+                color: #f1f5f9;
+            }
+        """)
+
+    def _on_tab_double_clicked(self, index: int):
+        if 0 <= index < self.count():
+            self.float_tab(index)
+
+    def _on_tab_context_menu(self, pos: QPoint):
+        tab_idx = self.tabBar().tabAt(pos)
+        if tab_idx < 0:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #171a22;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 16px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-family: 'Segoe UI', 'Kantumruy Pro', sans-serif;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+
+        title = self.tabText(tab_idx)
+        act_float = menu.addAction(f"🪟 Float '{title}' Tab into Window (ទាញចេញជាផ្ទាំងអណ្ដែត)")
+        act_float.triggered.connect(lambda: self.float_tab(tab_idx))
+
+        if tab_idx > 0:
+            act_left = menu.addAction("◀️ Move Tab Left (រំកិលទៅឆ្វេង)")
+            act_left.triggered.connect(lambda: self._move_tab(tab_idx, tab_idx - 1))
+
+        if tab_idx < self.count() - 1:
+            act_right = menu.addAction("▶️ Move Tab Right (រំកិលទៅស្តាំ)")
+            act_right.triggered.connect(lambda: self._move_tab(tab_idx, tab_idx + 1))
+
+        menu.exec(self.tabBar().mapToGlobal(pos))
+
+    def _move_tab(self, from_idx: int, to_idx: int):
+        if 0 <= from_idx < self.count() and 0 <= to_idx < self.count():
+            w = self.widget(from_idx)
+            text = self.tabText(from_idx)
+            icon = self.tabIcon(from_idx)
+            self.removeTab(from_idx)
+            self.insertTab(to_idx, w, icon, text)
+            self.setCurrentIndex(to_idx)
+
+    def float_tab(self, tab_idx: int):
+        if tab_idx < 0 or tab_idx >= self.count():
+            return
+        w = self.widget(tab_idx)
+        title = self.tabText(tab_idx)
+        icon = self.tabIcon(tab_idx)
+
+        # Create floating window for this tab
+        win = QWidget(None, Qt.WindowType.Window)
+        win.setWindowTitle(f"{title} - AI Studio Workspace")
+        win.setStyleSheet("background-color: #171a21; color: #e2e8f0; font-family: 'Segoe UI', 'Kantumruy Pro', sans-serif;")
+        win.resize(380, 520)
+        v_box = QVBoxLayout(win)
+        v_box.setContentsMargins(0, 0, 0, 0)
+        v_box.setSpacing(0)
+
+        # Header bar with Dock Back button
+        hdr = QFrame()
+        hdr.setFixedHeight(28)
+        hdr.setStyleSheet("background-color: #141720; border-bottom: 1px solid #283344;")
+        h_layout = QHBoxLayout(hdr)
+        h_layout.setContentsMargins(8, 0, 8, 0)
+        lbl = QLabel(title)
+        lbl.setStyleSheet("color: #cbd5e1; font-weight: bold; font-size: 11px;")
+        btn_dock = QPushButton("📥 Dock Back")
+        btn_dock.setStyleSheet("""
+            QPushButton {
+                background: #1e2430;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 3px;
+                padding: 1px 6px;
+                font-size: 10px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        h_layout.addWidget(lbl)
+        h_layout.addStretch()
+        h_layout.addWidget(btn_dock)
+        v_box.addWidget(hdr)
+
+        self.removeTab(tab_idx)
+        v_box.addWidget(w, 1)
+
+        def _dock_back():
+            v_box.removeWidget(w)
+            win.hide()
+            self.insertTab(tab_idx, w, icon, title)
+            self.setCurrentWidget(w)
+
+        btn_dock.clicked.connect(_dock_back)
+        win.closeEvent = lambda event: (_dock_back(), event.accept())
+        win.show()

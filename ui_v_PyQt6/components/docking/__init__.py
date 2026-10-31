@@ -1,7 +1,8 @@
 from .studio_dock_system import StudioDockWidget, StudioDockContainer, StudioDockTitleBar
-from .detachable_panel import DetachablePanelWrapper, StudioPanelHeader, FloatingStudioWindow
+from .detachable_panel import DetachablePanelWrapper, StudioPanelHeader, FloatingStudioWindow, PhotoshopTabWidget
 
 __all__ = [
     "StudioDockWidget", "StudioDockContainer", "StudioDockTitleBar",
-    "DetachablePanelWrapper", "StudioPanelHeader", "FloatingStudioWindow"
+    "DetachablePanelWrapper", "StudioPanelHeader", "FloatingStudioWindow",
+    "PhotoshopTabWidget"
 ]

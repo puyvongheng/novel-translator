@@ -33,6 +33,7 @@ class HeaderView(QWidget):
         self,
         parent=None,
         on_browse_video=None,
+        on_add_video_clip=None,
         on_import_srt=None,
         on_export_srt=None,
         on_start_translate=None,
@@ -71,6 +72,7 @@ class HeaderView(QWidget):
     ):
         super().__init__(parent)
         self.on_browse_video = on_browse_video
+        self.on_add_video_clip = on_add_video_clip
         self.on_import_srt = on_import_srt
         self.on_export_srt = on_export_srt
         self.on_start_translate = on_start_translate
@@ -281,6 +283,10 @@ class HeaderView(QWidget):
         if self.on_browse_video:
             act_open_v.triggered.connect(self.on_browse_video)
 
+        act_add_v = m_file.addAction("➕ Add Video Clip to Main Track... (បន្ថែម Video Clip លើបន្ទាត់មេ)")
+        act_add_v.setShortcut("Ctrl+Shift+O")
+        act_add_v.triggered.connect(lambda: self.on_add_video_clip() if self.on_add_video_clip else None)
+
         act_dl_v = m_file.addAction("📥 Download Video from URL... (ទាញយកវីដេអូពីតំណភ្ជាប់)")
         act_dl_v.triggered.connect(lambda: self._select_tab("downloader"))
 
@@ -351,6 +357,15 @@ class HeaderView(QWidget):
         act_ws_tools.triggered.connect(lambda: self._select_tab("video_tools"))
         act_ws_brand = m_view.addAction("⭐ Templates & Branding Studio (ម៉ាកសញ្ញា & Sponsor Ads)")
         act_ws_brand.triggered.connect(lambda: self._select_tab("branding"))
+        m_view.addSeparator()
+        act_swap_pt = m_view.addAction("🔄 Swap Preview ⇄ Timeline (Ctrl+Alt+S)")
+        act_swap_pt.triggered.connect(lambda: getattr(self.window(), "swap_preview_and_timeline", lambda: None)())
+        act_swap_ps = m_view.addAction("🔄 Swap Preview ⇄ Subtitles")
+        act_swap_ps.triggered.connect(lambda: getattr(self.window(), "swap_preview_and_subtitles", lambda: None)())
+        act_flip = m_view.addAction("🔄 Flip Horizontal (ឆ្វេង ⇄ ស្តាំ)")
+        act_flip.triggered.connect(lambda: getattr(self.window(), "flip_horizontal_panels", lambda: None)())
+        act_pre = m_view.addAction("🎬 Premiere Full Bottom Timeline")
+        act_pre.triggered.connect(lambda: getattr(self.window(), "apply_premiere_bottom_timeline_layout", lambda: None)())
         m_view.addSeparator()
         act_reset_layout = m_view.addAction("🔄 Reset Layout to Default (កំណត់ប្លង់ដើមឡើងវិញ)")
         if self.on_reset_panels:
@@ -425,15 +440,21 @@ class HeaderView(QWidget):
         # 6. SUBTITLE MENU
         m_subs = self.menu_bar.addMenu("Subtitle")
         m_asr = m_subs.addMenu("🎙️ Speech-to-Text / ចាប់យកអក្សរ (ASR)")
-        act_wx = m_asr.addAction("🎯 WhisperX (AI Diarization - បំបែកសំឡេងតួអង្គ A/B + Word Timestamps)")
+        act_sv_only = m_asr.addAction("🇨🇳 SenseVoice-Small (ASR Only)  ⚡ [ល្បឿនលឿនបំផុត 25x | មិនបំបែកតួអង្គ]")
         if self.on_capture_cc:
-            act_wx.triggered.connect(lambda: self.on_capture_cc("whisperx"))
-        act_fw = m_asr.addAction("⚡ Faster-Whisper (Multi-Language / ភាសាចម្រុះ)")
-        if self.on_capture_cc:
-            act_fw.triggered.connect(lambda: self.on_capture_cc("whisper"))
-        act_sv = m_asr.addAction("🇨🇳 SenseVoice-Small + CAM++ (Alibaba - ASR + Emotion SER + Events + Diarization)")
+            act_sv_only.triggered.connect(lambda: self.on_capture_cc("sensevoice_only"))
+        act_sv = m_asr.addAction("🇨🇳 SenseVoice-Small + CAM++  🏆 [ស្ដេចរឿងចិន 99.2% | Emotion SER | បំបែកតួអង្គ A/B]")
         if self.on_capture_cc:
             act_sv.triggered.connect(lambda: self.on_capture_cc("funasr"))
+        act_wx = m_asr.addAction("🎯 WhisperX (AI Diarization)  ⭐ [បំបែកតួអង្គ A/B 98.5% | Word Align | អង់គ្លេស/ទូទៅ]")
+        if self.on_capture_cc:
+            act_wx.triggered.connect(lambda: self.on_capture_cc("whisperx"))
+        act_fw = m_asr.addAction("⚡ Faster-Whisper  ⚡ [លឿន 10x | 99+ ភាសាចម្រុះ | ស្រាលម៉ាស៊ីន CPU/GPU]")
+        if self.on_capture_cc:
+            act_fw.triggered.connect(lambda: self.on_capture_cc("whisper"))
+        m_asr.addSeparator()
+        act_bench = m_asr.addAction("📊 តារាងប្រៀបធៀប & តាមដានគុណភាព AI Models (Benchmark Tracker)...")
+        act_bench.triggered.connect(self._open_cc_benchmark_dialog)
         act_fix_ov2 = m_subs.addAction("⚡ Fix Overlapping Timestamps (កែសម្រួលកុំឱ្យជាន់គ្នា)")
         if self.on_fix_overlaps:
             act_fix_ov2.triggered.connect(self.on_fix_overlaps)
@@ -564,6 +585,14 @@ class HeaderView(QWidget):
         self.act_p_props.triggered.connect(self._on_toggle_properties_action)
 
         m_win.addSeparator()
+
+        act_swap_pt_w = m_win.addAction("🔄 Swap Preview ⇄ Timeline (Ctrl+Alt+S)")
+        act_swap_pt_w.setIcon(get_qta_icon("fa5s.exchange-alt", color="#38bdf8") if get_qta_icon else get_sync_icon(16))
+        act_swap_pt_w.triggered.connect(lambda: getattr(self.window(), "swap_preview_and_timeline", lambda: None)())
+
+        act_pre_w = m_win.addAction("🎬 Premiere Full Bottom Timeline")
+        act_pre_w.setIcon(get_qta_icon("fa5s.film", color="#f59e0b") if get_qta_icon else get_sync_icon(16))
+        act_pre_w.triggered.connect(lambda: getattr(self.window(), "apply_premiere_bottom_timeline_layout", lambda: None)())
 
         act_dual = m_win.addAction("🖥️ Multi-Monitor / Float Monitor (ផ្ទាំងបញ្ចាំងលើ Monitor ទី២)")
         act_dual.setIcon(get_qta_icon("fa5s.desktop", color="#38bdf8") if get_qta_icon else get_sync_icon(16))
@@ -850,4 +879,14 @@ class HeaderView(QWidget):
                 self.lbl_ws.hide()
             else:
                 self.lbl_ws.show()
+
+    def _open_cc_benchmark_dialog(self):
+        from ui_v_PyQt6.components.subtitles.cc_model_benchmark_dialog import CCModelBenchmarkDialog
+        hist = getattr(self.window(), "_cc_benchmark_history", []) if hasattr(self, "window") and self.window() else []
+        dlg = CCModelBenchmarkDialog(
+            run_history=hist,
+            on_select_model=lambda key: self.on_capture_cc(key) if self.on_capture_cc else None,
+            parent=self
+        )
+        dlg.exec()
 

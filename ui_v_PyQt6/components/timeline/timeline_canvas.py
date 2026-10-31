@@ -7,12 +7,18 @@ real video filmstrip thumbnails, audio waveform peaks, and rich CC subtitle bloc
 import os
 import math
 import threading
+import time
 from ui_v_PyQt6.qt_compat import (
     QWidget, QPainter, QPen, QBrush, QColor, QFont, 
     Qt, QCursor, QPoint, QImage, QPixmap, QTimer, QMenu, QAction,
-    Signal, QToolTip, QInputDialog, QPainterPath, QRect, QRectF
+    Signal, QToolTip, QInputDialog, QPainterPath, QRect, QRectF,
+    QFileDialog, QMessageBox
 )
-from utils import format_timestamp
+from utils import (
+    format_timestamp,
+    format_compact_time,
+    format_compact_timing_range
+)
 
 
 def format_duration_short(seconds: float) -> str:
@@ -42,6 +48,9 @@ class TimelineCanvas(QWidget):
     - Multi-track visualization with high precision needle scrubbing
     """
     subtitles_modified = Signal()
+    video_selected = Signal(str)
+    video_clips_modified = Signal(list)
+    video_clip_selected = Signal(int, dict)
     video_dropped = Signal(str)
     subtitle_dropped = Signal(str)
     audio_dropped = Signal(str)
@@ -114,6 +123,7 @@ class TimelineCanvas(QWidget):
         self.overlay_clips = []
         self.video_keyframes = []
         self.active_kf_idx = -1
+        self.active_video_clip_idx = 0
         self.active_sub_idx = -1
         self.active_overlay_idx = -1
         self._hit_track = "cc"
@@ -155,6 +165,46 @@ class TimelineCanvas(QWidget):
         # Mark In / Mark Out Range States
         self.mark_in = None
         self.mark_out = None
+
+        # Hover Animation & Floating File Preview HUD Card
+        self._hover_pos = None          # QPoint or None
+        self._hover_clip_info = None    # dict containing track, clip data, rect, etc.
+        self._hover_anim_phase = 0.0    # 0.0 to 2*pi for glowing hover animation
+        self._hover_anim_timer = QTimer(self)
+        self._hover_anim_timer.setInterval(25)
+        self._hover_anim_timer.timeout.connect(self._on_hover_anim_tick)
+
+        # Timeline Drag & Drop Animation and Ripple State
+        self._is_timeline_drag_hovering = False
+        self._timeline_drag_type = "subtitle"
+        self._timeline_drop_ripple_pos = None
+        self._timeline_drop_ripple_radius = 0.0
+        self._timeline_drop_ripple_opacity = 0.0
+        self._timeline_drop_ripple_timer = QTimer(self)
+        self._timeline_drop_ripple_timer.setInterval(16)
+        self._timeline_drop_ripple_timer.timeout.connect(self._on_timeline_drop_ripple_tick)
+
+    def _on_hover_anim_tick(self):
+        """Ticks smooth hover breathing/pulse animation."""
+        self._hover_anim_phase = (self._hover_anim_phase + 0.12) % (2.0 * math.pi)
+        self.update()
+
+    def _on_timeline_drop_ripple_tick(self):
+        """Ticks smooth ripple wave expansion when file is dropped on timeline."""
+        self._timeline_drop_ripple_radius += 16.0
+        self._timeline_drop_ripple_opacity -= 0.045
+        if self._timeline_drop_ripple_opacity <= 0.0:
+            self._timeline_drop_ripple_opacity = 0.0
+            self._timeline_drop_ripple_pos = None
+            self._timeline_drop_ripple_timer.stop()
+        self.update()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hover_pos = None
+        self._hover_clip_info = None
+        self._hover_anim_timer.stop()
+        self.update()
 
     def set_mark_in(self, t: float = None):
         """Sets Mark In point at specified time or current playhead (I)."""
@@ -205,6 +255,8 @@ class TimelineCanvas(QWidget):
             self.subtitles = subtitles
         if video_clips is not None:
             self.video_clips = video_clips
+            if len(video_clips) > 0:
+                self._recalculate_video_clips()
         if audio_tracks is not None:
             self.audio_tracks = audio_tracks
         if overlay_clips is not None:
@@ -566,7 +618,13 @@ class TimelineCanvas(QWidget):
                 actor = "តួស្រី (Female)" if g == "female" else ("តួប្រុស (Male)" if g == "male" else "តួទូទៅ (Dialogue)")
             voice_name = sub.get("voice_name") or sub.get("voice") or ""
             gender = sub.get("gender") or ("female" if ("ស្រី" in actor or "Female" in actor) else ("male" if ("ប្រុស" in actor or "Male" in actor) else "dialogue"))
-            has_audio = bool(sub.get("audio_file") or sub.get("audio_path"))
+            aud_path = sub.get("audio_file") or sub.get("audio_path") or ""
+            has_audio = False
+            if aud_path:
+                try:
+                    has_audio = os.path.exists(aud_path) and os.path.getsize(aud_path) > 100
+                except Exception:
+                    has_audio = False
             items.append({
                 "is_track": False,
                 "sub_idx": idx,
@@ -578,6 +636,7 @@ class TimelineCanvas(QWidget):
                 "voice_name": voice_name,
                 "gender": gender,
                 "has_audio": has_audio,
+                "audio_path": aud_path,
                 "rate": sub.get("rate", "+0%"),
                 "pitch": sub.get("pitch", "+0Hz"),
                 "volume": 1.0,
@@ -588,10 +647,10 @@ class TimelineCanvas(QWidget):
 
     def _calculate_lanes(self, items, is_audio=False, is_overlay=False):
         """
-        Computes dynamic lane allocation using interval graph scheduling.
-        When dialogue, voice dubbing, or overlay clips overlap in time, overlapping clips
-        dynamically branch into stacked sub-rows (Lane 1, Lane 2, etc.),
-        preventing clips from colliding or hiding each other.
+        Computes dynamic lane allocation with support for user-defined vertical rows (lanes).
+        Users can drag clips up and down between rows/lanes freely.
+        When clips have an explicit lane, they remain locked to that row.
+        Other clips automatically branch into non-colliding rows.
         Returns:
             dict: clip_idx -> lane_index (0-indexed)
             int: total_lanes count (at least 1)
@@ -600,7 +659,16 @@ class TimelineCanvas(QWidget):
             return {}, 1
 
         entries = []
+        max_user_lane = -1
         for idx, item in enumerate(items):
+            user_lane = None
+            if hasattr(item, "lane"):
+                user_lane = getattr(item, "lane", None)
+            elif isinstance(item, dict):
+                user_lane = item.get("lane")
+                if user_lane is None and is_audio and item.get("audio_lane") is not None:
+                    user_lane = item.get("audio_lane")
+
             if is_overlay:
                 s, e = self._get_overlay_time_span(item)
             elif is_audio and isinstance(item, dict) and "is_track" in item:
@@ -613,30 +681,52 @@ class TimelineCanvas(QWidget):
                     dur = float(item.get("audio_dur", 0.0))
                     if dur > 0.1:
                         e = max(e, s + dur)
-            # Ensure a minimal positive duration for layout stability
-            entries.append((idx, s, max(s + 0.05, e)))
 
-        # Sort primarily by start time, then end time
-        entries.sort(key=lambda x: (x[1], x[2]))
+            u_l = None
+            if user_lane is not None:
+                try:
+                    u_l = max(0, int(user_lane))
+                    if u_l > max_user_lane:
+                        max_user_lane = u_l
+                except Exception:
+                    u_l = None
 
-        lane_end_times = []  # lane_index -> last end time
+            entries.append((idx, s, max(s + 0.05, e), u_l))
+
         clip_to_lane = {}
+        assigned_indices = set()
 
-        for idx, s, e in entries:
-            assigned_lane = None
-            for l_idx, l_end in enumerate(lane_end_times):
-                if s >= l_end - 0.04:  # small tolerance for adjacent clips
-                    assigned_lane = l_idx
-                    lane_end_times[l_idx] = max(l_end, e)
+        # Step 1: Assign clips with user-designated row
+        num_lanes = max(1, max_user_lane + 1)
+        lane_intervals = [[] for _ in range(num_lanes)]
+        for idx, s, e, u_l in entries:
+            if u_l is not None:
+                clip_to_lane[idx] = u_l
+                assigned_indices.add(idx)
+                while len(lane_intervals) <= u_l:
+                    lane_intervals.append([])
+                lane_intervals[u_l].append((s, e))
+
+        # Step 2: Greedily place remaining clips into non-colliding lanes
+        unassigned = [ent for ent in entries if ent[0] not in assigned_indices]
+        unassigned.sort(key=lambda x: (x[1], x[2]))
+
+        for idx, s, e, _ in unassigned:
+            chosen_lane = None
+            for l_idx in range(len(lane_intervals)):
+                collision = any(not (e <= ls + 0.04 or s >= le - 0.04) for ls, le in lane_intervals[l_idx])
+                if not collision:
+                    chosen_lane = l_idx
+                    lane_intervals[l_idx].append((s, e))
                     break
 
-            if assigned_lane is None:
-                assigned_lane = len(lane_end_times)
-                lane_end_times.append(e)
+            if chosen_lane is None:
+                chosen_lane = len(lane_intervals)
+                lane_intervals.append([(s, e)])
 
-            clip_to_lane[idx] = assigned_lane
+            clip_to_lane[idx] = chosen_lane
 
-        total_lanes = max(1, len(lane_end_times))
+        total_lanes = max(1, len(lane_intervals), max_user_lane + 1)
         return clip_to_lane, total_lanes
 
     def _get_tracks_layout(self):
@@ -711,17 +801,30 @@ class TimelineCanvas(QWidget):
         btn_h = 24
         bx = 42
 
-        v_rect = QRect(bx, layout["v_y"] + (layout["v_h"] - btn_h) // 2, btn_w, btn_h)
+        v_y = layout["v_y"]
+        v_h = layout["v_h"]
+        v_eye = QRect(26, v_y + (v_h - 22) // 2, 21, 22)
+        v_add = QRect(49, v_y + (v_h - 22) // 2, 22, 22)
+
         cc_rect = QRect(bx, layout["cc_y"] + (layout["lane_h"] - btn_h) // 2, btn_w, btn_h)
         a_rect = QRect(bx, layout["a_y"] + (layout["lane_h"] - btn_h) // 2, btn_w, btn_h)
         ov_rect = QRect(bx, layout["ov_y"] + (layout["lane_h"] - btn_h) // 2, btn_w, btn_h)
 
         return {
-            "video_eye": v_rect,
+            "video_eye": v_eye,
+            "video_add": v_add,
             "cc_eye": cc_rect,
             "audio_speaker": a_rect,
             "overlay_eye": ov_rect
         }
+
+    def _draw_plus_icon(self, painter: QPainter, x: int, y: int, color: QColor):
+        """Draws small crisp plus (+) icon"""
+        painter.save()
+        painter.setPen(QPen(color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(x + 2, y + 6, x + 10, y + 6)
+        painter.drawLine(x + 6, y + 2, x + 6, y + 10)
+        painter.restore()
 
     def _draw_camera_icon(self, painter: QPainter, x: int, y: int, color: QColor):
         """Draws rounded video camera icon matching modern NLE track icon"""
@@ -942,6 +1045,37 @@ class TimelineCanvas(QWidget):
         pps = self.get_pixels_per_sec()
         lane_h = layout["lane_h"]
 
+        # 0. Check Master Video Track
+        v_y = layout["v_y"]
+        v_h = layout["v_h"]
+        if v_y <= pos_y <= v_y + v_h and self.is_video_visible:
+            clips = self.video_clips if self.video_clips else []
+            if clips:
+                for c_idx, clip in enumerate(clips):
+                    c_start_t = float(clip.get("timeline_start", 0.0))
+                    c_dur = float(clip.get("duration", 0.0))
+                    cx1 = self.HEADER_W + int(c_start_t * pps - self.offset_x)
+                    cw = max(4, int(c_dur * pps))
+                    if cx1 - 6 <= pos_x <= cx1 + cw + 6:
+                        self._hit_track = "video"
+                        self.active_video_clip_idx = c_idx
+                        if pos_x <= cx1 + 14:
+                            return (c_idx, "left_edge")
+                        if pos_x >= cx1 + cw - 14:
+                            return (c_idx, "right_edge")
+                        return (c_idx, "body")
+            else:
+                vid_start_x = self.HEADER_W + int(0 - self.offset_x)
+                vid_w = max(4, int(self.duration * pps))
+                if vid_start_x - 6 <= pos_x <= vid_start_x + vid_w + 6:
+                    self._hit_track = "video"
+                    self.active_video_clip_idx = 0
+                    if pos_x <= vid_start_x + 16:
+                        return (0, "left_edge")
+                    if pos_x >= vid_start_x + vid_w - 16:
+                        return (0, "right_edge")
+                    return (0, "body")
+
         # 1. Check CC Subtitles Track lanes
         if self.subtitles and self.is_cc_visible:
             cc_y = layout["cc_y"]
@@ -1007,8 +1141,171 @@ class TimelineCanvas(QWidget):
 
         return (-1, None)
 
+    def _get_clip_under_cursor(self, pos_x: int, pos_y: int):
+        """
+        Detects the clip (video, subtitle, audio, overlay) under cursor coordinates
+        and returns a rich metadata dict for preview rendering.
+        """
+        if pos_x < self.HEADER_W:
+            return None
+
+        layout = self._get_tracks_layout()
+        pps = self.get_pixels_per_sec()
+        lane_h = layout["lane_h"]
+        hw = self.HEADER_W
+
+        # 1. Master Video Track
+        v_y = layout["v_y"]
+        v_h = layout["v_h"]
+        if v_y <= pos_y <= v_y + v_h and self.is_video_visible:
+            if self.video_clips:
+                for c_idx, clip in enumerate(self.video_clips):
+                    c_start_t = float(clip.get("timeline_start", 0.0))
+                    c_dur = float(clip.get("duration", 0.0))
+                    cx1 = hw + int(c_start_t * pps - self.offset_x)
+                    cw = max(4, int(c_dur * pps))
+                    if cx1 <= pos_x <= cx1 + cw:
+                        fpath = clip.get("path") or self.video_path or ""
+                        sz_str = ""
+                        if fpath and os.path.exists(fpath):
+                            try:
+                                sz_mb = os.path.getsize(fpath) / (1024 * 1024)
+                                sz_str = f"{sz_mb:.1f} MB"
+                            except Exception:
+                                pass
+                        return {
+                            "type": "video",
+                            "name": clip.get("name") or (os.path.basename(fpath) if fpath else f"Video Segment #{c_idx+1}"),
+                            "path": fpath,
+                            "size": sz_str,
+                            "start": c_start_t,
+                            "end": c_start_t + c_dur,
+                            "duration": c_dur,
+                            "rect": QRect(cx1, v_y + 2, cw, v_h - 4)
+                        }
+            else:
+                vid_start_x = hw + int(0 - self.offset_x)
+                vid_w = max(4, int(self.duration * pps))
+                if vid_start_x <= pos_x <= vid_start_x + vid_w:
+                    fpath = self.video_path or ""
+                    sz_str = ""
+                    if fpath and os.path.exists(fpath):
+                        try:
+                            sz_mb = os.path.getsize(fpath) / (1024 * 1024)
+                            sz_str = f"{sz_mb:.1f} MB"
+                        except Exception:
+                            pass
+                    return {
+                        "type": "video",
+                        "name": os.path.basename(fpath) if fpath else "Master Video Track",
+                        "path": fpath,
+                        "size": sz_str,
+                        "start": 0.0,
+                        "end": self.duration,
+                        "duration": self.duration,
+                        "rect": QRect(vid_start_x, v_y + 2, vid_w, v_h - 4)
+                    }
+
+        # 2. CC Subtitles Track
+        if self.subtitles and self.is_cc_visible:
+            cc_y = layout["cc_y"]
+            cc_lane_map = layout["cc_lane_map"]
+            for idx, sub in enumerate(self.subtitles):
+                lane = cc_lane_map.get(idx, 0)
+                item_y = cc_y + 3 + lane * lane_h
+                item_h = lane_h - 6
+                if item_y <= pos_y <= item_y + item_h:
+                    s = float(sub.get("start", 0.0))
+                    e = float(sub.get("end", 0.0))
+                    bx = hw + int(s * pps - self.offset_x)
+                    bw = max(14, int((e - s) * pps))
+                    if bx <= pos_x <= bx + bw:
+                        orig = sub.get("orig_text") or sub.get("text") or ""
+                        km = sub.get("khmer_text") or ""
+                        actor = sub.get("actor") or sub.get("speaker") or sub.get("character") or sub.get("gender") or "Speaker"
+                        audio_p = sub.get("audio_file") or sub.get("audio_path") or ""
+                        return {
+                            "type": "cc",
+                            "idx": idx,
+                            "name": f"Subtitle #{idx + 1}",
+                            "orig_text": orig,
+                            "khmer_text": km,
+                            "actor": actor,
+                            "path": audio_p,
+                            "start": s,
+                            "end": e,
+                            "duration": e - s,
+                            "rate": sub.get("rate") or "+0%",
+                            "rect": QRect(bx, item_y, bw, item_h)
+                        }
+
+        # 3. Audio Voice Dub & External Audio Track
+        audio_items = self._get_audio_items_for_timeline()
+        if audio_items:
+            a_y = layout["a_y"]
+            a_lane_map = layout["a_lane_map"]
+            for idx, a_it in enumerate(audio_items):
+                lane = a_lane_map.get(idx, 0)
+                item_y = a_y + 3 + lane * lane_h
+                item_h = lane_h - 6
+                if item_y <= pos_y <= item_y + item_h:
+                    s = a_it["start"]
+                    e = a_it["end"]
+                    ax = hw + int(s * pps - self.offset_x)
+                    aw = max(14, int((e - s) * pps))
+                    if ax <= pos_x <= ax + aw:
+                        fpath = a_it.get("file_path") or a_it.get("path") or ""
+                        sz_str = ""
+                        if fpath and os.path.exists(fpath):
+                            try:
+                                sz_kb = os.path.getsize(fpath) / 1024
+                                sz_str = f"{sz_kb:.0f} KB" if sz_kb < 1024 else f"{sz_kb/1024:.1f} MB"
+                            except Exception:
+                                pass
+                        return {
+                            "type": "audio",
+                            "idx": idx,
+                            "name": a_it.get("name") or (os.path.basename(fpath) if fpath else f"Audio #{idx+1}"),
+                            "path": fpath,
+                            "size": sz_str,
+                            "voice": a_it.get("voice") or a_it.get("actor") or "Voice Audio",
+                            "start": s,
+                            "end": e,
+                            "duration": e - s,
+                            "rect": QRect(ax, item_y, aw, item_h)
+                        }
+
+        # 4. Overlays Track
+        if self.overlay_clips and self.is_overlay_visible:
+            ov_y = layout["ov_y"]
+            ov_lane_map = layout["ov_lane_map"]
+            for idx, item in enumerate(self.overlay_clips):
+                lane = ov_lane_map.get(idx, 0)
+                item_y = ov_y + 3 + lane * lane_h
+                item_h = lane_h - 6
+                if item_y <= pos_y <= item_y + item_h:
+                    st, et = self._get_overlay_time_span(item)
+                    bx = hw + int(st * pps - self.offset_x)
+                    bw = max(14, int((et - st) * pps))
+                    if bx <= pos_x <= bx + bw:
+                        itype, iname = self._get_overlay_info(item)
+                        return {
+                            "type": "overlay",
+                            "idx": idx,
+                            "name": iname or itype.title(),
+                            "itype": itype,
+                            "start": st,
+                            "end": et,
+                            "duration": et - st,
+                            "rect": QRect(bx, item_y, bw, item_h)
+                        }
+
+        return None
+
     def mousePressEvent(self, event):
         self.setFocus()
+        self._hover_clip_info = None
+        self._hover_anim_timer.stop()
         pos_x = int(event.position().x() if hasattr(event, "position") else event.pos().x())
         pos_y = int(event.position().y() if hasattr(event, "position") else event.pos().y())
         pps = self.get_pixels_per_sec()
@@ -1041,6 +1338,9 @@ class TimelineCanvas(QWidget):
                 if btn_rects["video_eye"].contains(pt):
                     self.toggle_video_visibility()
                     return
+                elif btn_rects.get("video_add") and btn_rects["video_add"].contains(pt):
+                    self._prompt_add_video_clip()
+                    return
                 elif btn_rects["cc_eye"].contains(pt):
                     self.toggle_cc_visibility()
                     return
@@ -1049,6 +1349,7 @@ class TimelineCanvas(QWidget):
                     return
                 elif btn_rects["overlay_eye"].contains(pt):
                     self.toggle_overlay_visibility()
+                    return
                 # 1b. Check if clicked on a Video Keyframe Diamond!
             kf_idx, kf = self._hit_test_keyframe(pos_x, pos_y)
             if kf_idx >= 0:
@@ -1063,6 +1364,34 @@ class TimelineCanvas(QWidget):
 
             clip_idx, hit_part = self._hit_test_clip(pos_x, pos_y)
 
+            # Handle Master Video Track click
+            if self._hit_track == "video":
+                clips = self.video_clips if self.video_clips else []
+                if clips and 0 <= clip_idx < len(clips):
+                    self.active_video_clip_idx = clip_idx
+                    target_clip = clips[clip_idx]
+                    self._orig_clip_start = float(target_clip.get("start", 0.0))
+                    self._orig_clip_end = float(target_clip.get("end", target_clip.get("duration", 1.0)))
+                    self._orig_clip_dur = float(target_clip.get("duration", 1.0))
+                    self._drag_start_x = pos_x
+                    self._drag_start_y = pos_y
+                    self._has_clip_changed = False
+                    if hit_part == "left_edge":
+                        self._interaction_mode = "trim_video_start"
+                        self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
+                    elif hit_part == "right_edge":
+                        self._interaction_mode = "trim_video_end"
+                        self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
+                    else:
+                        self._interaction_mode = "select_video_clip"
+                    self.video_clip_selected.emit(clip_idx, target_clip)
+                    self.video_selected.emit(target_clip.get("path") or self.video_path or "")
+                else:
+                    self.video_selected.emit(self.video_path or "")
+                self._seek_from_x(pos_x, scrubbing=False)
+                self.update()
+                return
+
             # Handle Overlays & Blur FX Track click
             if self._hit_track == "overlay" and 0 <= clip_idx < len(self.overlay_clips):
                 self.active_overlay_idx = clip_idx
@@ -1071,6 +1400,7 @@ class TimelineCanvas(QWidget):
                 self._orig_clip_start = st
                 self._orig_clip_end = et
                 self._drag_start_x = pos_x
+                self._drag_start_y = pos_y
                 self._has_clip_changed = False
                 if hit_part == "left_edge":
                     self._interaction_mode = "trim_overlay_start"
@@ -1092,6 +1422,7 @@ class TimelineCanvas(QWidget):
                 self._active_audio_item = a_it
                 self._active_clip_idx = clip_idx
                 self._drag_start_x = pos_x
+                self._drag_start_y = pos_y
                 self._orig_clip_start = float(a_it["start"])
                 self._orig_clip_end = float(a_it["end"])
                 self._has_clip_changed = False
@@ -1122,6 +1453,7 @@ class TimelineCanvas(QWidget):
                 self._interaction_mode = "trim_start" if hit_part == "left_edge" else "trim_end"
                 self._active_clip_idx = clip_idx
                 self._drag_start_x = pos_x
+                self._drag_start_y = pos_y
                 if 0 <= clip_idx < len(self.subtitles):
                     sub = self.subtitles[clip_idx]
                     self._orig_clip_start = float(sub.get("start", 0.0))
@@ -1141,6 +1473,7 @@ class TimelineCanvas(QWidget):
                 self._interaction_mode = "move"
                 self._active_clip_idx = clip_idx
                 self._drag_start_x = pos_x
+                self._drag_start_y = pos_y
                 self._has_clip_changed = False
 
                 is_ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -1222,17 +1555,10 @@ class TimelineCanvas(QWidget):
                 menu.exec(global_pos)
                 return
 
-            # Check if right-clicked on Video Track empty area
+            # Check if right-clicked on Video Track
             if layout["v_y"] <= pos_y <= layout["v_y"] + layout["v_h"]:
-                menu = QMenu(self)
-                menu.setStyleSheet("""
-                    QMenu { background-color: #1a202c; border: 1px solid #2d3748; color: #e2e8f0; padding: 4px; border-radius: 6px; }
-                    QMenu::item:selected { background-color: #0284c7; }
-                """)
-                menu.addAction("🎬 Video Track Options").setEnabled(False)
-                menu.addSeparator()
-                menu.addAction("◆ Add Video Keyframe at Playhead").triggered.connect(lambda: self.keyframe_added.emit(self.current_time))
-                menu.exec(global_pos)
+                clip_idx, _ = self._hit_test_clip(pos_x, pos_y)
+                self._show_video_context_menu(clip_idx, global_pos)
                 return
 
             clip_idx, _ = self._hit_test_clip(pos_x, pos_y)
@@ -1295,6 +1621,9 @@ class TimelineCanvas(QWidget):
             if matched_btn == "video_eye":
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 QToolTip.showText(global_pt, "👁️ បិទ/បើក បង្ហាញ Master Video Track", self)
+            elif matched_btn == "video_add":
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                QToolTip.showText(global_pt, "➕ បន្ថែម Video Clip ថ្មីលើបន្ទាត់មេ Track 1 (Add Video Clip)", self)
             elif matched_btn == "cc_eye":
                 self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 QToolTip.showText(global_pt, "👁️ បិទ/បើក បង្ហាញ CC Subtitles Track", self)
@@ -1348,9 +1677,14 @@ class TimelineCanvas(QWidget):
 
         elif self._interaction_mode == "move":
             delta_x = pos_x - self._drag_start_x
-            if abs(delta_x) > 3:
+            if abs(delta_x) > 3 or abs(pos_y - getattr(self, "_drag_start_y", pos_y)) > 3:
                 self._pressed_was_already_selected = False
             delta_t = delta_x / pps
+
+            layout = self._get_tracks_layout()
+            cc_y = layout["cc_y"]
+            lane_h = layout["lane_h"]
+            target_lane = max(0, min(10, int((pos_y - cc_y) // lane_h)))
 
             if self._orig_positions:
                 min_start = min(s for s, e in self._orig_positions.values())
@@ -1364,6 +1698,8 @@ class TimelineCanvas(QWidget):
                         new_e = round(new_s + dur, 3)
                         self.subtitles[idx]["start"] = new_s
                         self.subtitles[idx]["end"] = new_e
+                        if idx == self._active_clip_idx:
+                            self.subtitles[idx]["lane"] = target_lane
 
                 self._has_clip_changed = True
 
@@ -1371,10 +1707,11 @@ class TimelineCanvas(QWidget):
                     act_sub = self.subtitles[self._active_clip_idx]
                     global_pt = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
                     count_sel = len(self._orig_positions)
+                    row_info = f" | Row {target_lane + 1}"
                     if count_sel > 1:
-                        t_info = f"↔️ Move ({count_sel} Clips): {format_timestamp(act_sub['start']).split(',')[0]} ➔ {format_timestamp(act_sub['end']).split(',')[0]}"
+                        t_info = f"↔️ Move ({count_sel} Clips): {format_timestamp(act_sub['start']).split(',')[0]} ➔ {format_timestamp(act_sub['end']).split(',')[0]}{row_info}"
                     else:
-                        t_info = f"↔️ Move: {format_timestamp(act_sub['start']).split(',')[0]} ➔ {format_timestamp(act_sub['end']).split(',')[0]}"
+                        t_info = f"↔️ Move: {format_timestamp(act_sub['start']).split(',')[0]} ➔ {format_timestamp(act_sub['end']).split(',')[0]}{row_info}"
                     QToolTip.showText(global_pt, t_info, self)
                     self._seek_from_x(self.HEADER_W + int(act_sub["start"] * pps - self.offset_x))
 
@@ -1420,18 +1757,61 @@ class TimelineCanvas(QWidget):
         elif self._interaction_mode == "move_overlay":
             delta_x = pos_x - self._drag_start_x
             delta_t = delta_x / pps
+            layout = self._get_tracks_layout()
+            ov_y = layout["ov_y"]
+            lane_h = layout["lane_h"]
+            target_lane = max(0, min(10, int((pos_y - ov_y) // lane_h)))
+
             if 0 <= self.active_overlay_idx < len(self.overlay_clips):
                 item = self.overlay_clips[self.active_overlay_idx]
                 dur = self._orig_clip_end - self._orig_clip_start
                 new_s = max(0.0, round(self._orig_clip_start + delta_t, 3))
                 new_e = round(new_s + dur, 3)
                 self._set_overlay_time_span(item, new_s, new_e)
+                if hasattr(item, "lane"):
+                    item.lane = target_lane
+                elif isinstance(item, dict):
+                    item["lane"] = target_lane
                 self._has_clip_changed = True
                 global_pt = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
                 _, iname = self._get_overlay_info(item)
-                QToolTip.showText(global_pt, f"↔️ Move Overlay ({iname}): {format_timestamp(new_s).split(',')[0]} ➔ {format_timestamp(new_e).split(',')[0]}", self)
+                QToolTip.showText(global_pt, f"↔️ Move Overlay ({iname}): {format_timestamp(new_s).split(',')[0]} ➔ {format_timestamp(new_e).split(',')[0]} | Row {target_lane + 1}", self)
                 self.overlays_modified.emit()
                 self.update()
+            return
+
+        elif self._interaction_mode == "trim_video_start" and self.video_clips and 0 <= getattr(self, "active_video_clip_idx", -1) < len(self.video_clips):
+            delta_x = pos_x - self._drag_start_x
+            delta_t = delta_x / pps
+            c = self.video_clips[self.active_video_clip_idx]
+            orig_st = getattr(self, "_orig_clip_start", 0.0)
+            orig_et = getattr(self, "_orig_clip_end", float(c.get("duration", 1.0)))
+            new_st = max(0.0, min(orig_et - 0.2, round(orig_st + delta_t, 3)))
+            c["start"] = new_st
+            c["duration"] = round(orig_et - new_st, 3)
+            self._has_clip_changed = True
+            self._recalculate_video_clips()
+            global_pt = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+            c_name = c.get("name", "Video Clip")
+            QToolTip.showText(global_pt, f"✂️ Trim Video Start: {c_name} (Dur: {c['duration']:.2f}s)", self)
+            self.update()
+            return
+
+        elif self._interaction_mode == "trim_video_end" and self.video_clips and 0 <= getattr(self, "active_video_clip_idx", -1) < len(self.video_clips):
+            delta_x = pos_x - self._drag_start_x
+            delta_t = delta_x / pps
+            c = self.video_clips[self.active_video_clip_idx]
+            orig_st = getattr(self, "_orig_clip_start", 0.0)
+            orig_dur = getattr(self, "_orig_clip_dur", float(c.get("duration", 1.0)))
+            new_dur = max(0.2, round(orig_dur + delta_t, 3))
+            c["end"] = round(orig_st + new_dur, 3)
+            c["duration"] = new_dur
+            self._has_clip_changed = True
+            self._recalculate_video_clips()
+            global_pt = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+            c_name = c.get("name", "Video Clip")
+            QToolTip.showText(global_pt, f"✂️ Trim Video End: {c_name} (Dur: {new_dur:.2f}s)", self)
+            self.update()
             return
 
         elif self._interaction_mode == "trim_overlay_start":
@@ -1469,23 +1849,31 @@ class TimelineCanvas(QWidget):
         elif self._interaction_mode == "move_audio" and hasattr(self, "_active_audio_item") and self._active_audio_item:
             delta_x = pos_x - self._drag_start_x
             delta_t = delta_x / pps
+            layout = self._get_tracks_layout()
+            a_y = layout["a_y"]
+            lane_h = layout["lane_h"]
+            target_lane = max(0, min(10, int((pos_y - a_y) // lane_h)))
+
             a_it = self._active_audio_item
             dur = self._orig_clip_end - self._orig_clip_start
             new_s = max(0.0, round(self._orig_clip_start + delta_t, 3))
             new_e = round(new_s + dur, 3)
+            a_it["lane"] = target_lane
             if a_it.get("is_track"):
                 a_it["raw"]["start"] = new_s
                 a_it["raw"]["end"] = new_e
+                a_it["raw"]["lane"] = target_lane
                 self._has_clip_changed = True
                 self.update()
             elif a_it.get("sub_idx", -1) >= 0:
                 s_i = a_it["sub_idx"]
                 self.subtitles[s_i]["start"] = new_s
                 self.subtitles[s_i]["end"] = new_e
+                self.subtitles[s_i]["audio_lane"] = target_lane
                 self._has_clip_changed = True
                 self.update()
             global_pt = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
-            t_info = f"↔️ Move Audio ({a_it['name'][:16]}): {format_timestamp(new_s).split(',')[0]} ➔ {format_timestamp(new_e).split(',')[0]}"
+            t_info = f"↔️ Move Audio ({a_it['name'][:16]}): {format_timestamp(new_s).split(',')[0]} ➔ {format_timestamp(new_e).split(',')[0]} | Row {target_lane + 1}"
             QToolTip.showText(global_pt, t_info, self)
             return
 
@@ -1562,6 +1950,17 @@ class TimelineCanvas(QWidget):
         else:
             self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
 
+        # Update hover position & detected clip for animation and preview HUD card
+        self._hover_pos = QPoint(pos_x, pos_y)
+        hover_info = self._get_clip_under_cursor(pos_x, pos_y)
+        if hover_info != self._hover_clip_info:
+            self._hover_clip_info = hover_info
+            if hover_info and not self._hover_anim_timer.isActive():
+                self._hover_anim_timer.start()
+            elif not hover_info and self._hover_anim_timer.isActive():
+                self._hover_anim_timer.stop()
+        self.update()
+
     def mouseReleaseEvent(self, event):
         if getattr(self, "_is_dragging_v_scrollbar", False):
             self._is_dragging_v_scrollbar = False
@@ -1602,7 +2001,9 @@ class TimelineCanvas(QWidget):
             self._pressed_was_already_selected = False
 
             if self._has_clip_changed:
-                if self._interaction_mode in ("move_audio", "trim_audio_start", "trim_audio_end"):
+                if self._interaction_mode in ("trim_video_start", "trim_video_end"):
+                    self.video_clips_modified.emit(self.video_clips)
+                elif self._interaction_mode in ("move_audio", "trim_audio_start", "trim_audio_end"):
                     self.audio_tracks_modified.emit()
                     if hasattr(self, "on_subtitles_modified") and self.on_subtitles_modified:
                         self.on_subtitles_modified()
@@ -1724,11 +2125,32 @@ class TimelineCanvas(QWidget):
         """Adds an independent audio track (MP3, WAV, etc.) to the Timeline with duration probe."""
         if not file_path or not os.path.exists(file_path):
             return None
-        from utils.media_utils import get_video_info
-        info = get_video_info(file_path)
-        a_dur = float(info.get("duration", 0.0) or 5.0)
+
+        a_dur = 0.0
+        try:
+            from utils.media_utils import get_video_info
+            info = get_video_info(file_path)
+            a_dur = float(info.get("duration", 0.0) or 0.0)
+        except Exception:
+            pass
+
         if a_dur < 0.1:
-            a_dur = 5.0
+            try:
+                import wave
+                with wave.open(file_path, "r") as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate()
+                    if rate > 0:
+                        a_dur = frames / float(rate)
+            except Exception:
+                pass
+
+        if a_dur < 0.1:
+            try:
+                sz = os.path.getsize(file_path)
+                a_dur = max(5.0, round(sz / 16000.0, 2))
+            except Exception:
+                a_dur = 10.0
 
         st = max(0.0, float(start_time))
         entry = {
@@ -1738,7 +2160,7 @@ class TimelineCanvas(QWidget):
             "start": round(st, 3),
             "end": round(st + a_dur, 3),
             "duration": round(a_dur, 3),
-            "volume": 1.0,
+            "volume": 0.5,
             "speed": 1.0,
             "is_bgm": True
         }
@@ -1898,7 +2320,9 @@ class TimelineCanvas(QWidget):
             prefix = "✓ " if abs(curr_vol - val) < 0.01 else "   "
             def _set_v(v=val):
                 if a_it.get("is_track"):
-                    a_it["raw"]["volume"] = v
+                    a_it["volume"] = v
+                    if "raw" in a_it and isinstance(a_it["raw"], dict):
+                        a_it["raw"]["volume"] = v
                     self.audio_tracks_modified.emit()
                 else:
                     sub = a_it.get("raw")
@@ -2020,7 +2444,9 @@ class TimelineCanvas(QWidget):
 
         pps = self.get_pixels_per_sec()
         drop_x = int(event.position().x() if hasattr(event, "position") else event.pos().x())
+        drop_y = int(event.position().y() if hasattr(event, "position") else event.pos().y())
         click_t = max(0.0, (drop_x - self.HEADER_W + self.offset_x) / pps)
+        layout = self._get_tracks_layout()
 
         for url in event.mimeData().urls():
             local_path = url.toLocalFile()
@@ -2029,15 +2455,19 @@ class TimelineCanvas(QWidget):
 
             ext = os.path.splitext(local_path)[1].lower()
             if ext in [".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm", ".ts"]:
-                if self.video_path and os.path.exists(self.video_path):
-                    # Master video is already open -> Add dropped video as PiP video overlay clip
+                if drop_y >= layout["ov_y"]:
+                    # Dropped on Track 4 (Overlays & PiP Track)
                     self.add_video_overlay(local_path, click_t)
                     event.acceptProposedAction()
                     break
                 else:
-                    self.video_dropped.emit(local_path)
-                    if hasattr(self, "on_video_dropped") and self.on_video_dropped:
-                        self.on_video_dropped(local_path)
+                    # Dropped on Track 1 (Main Video Track) or general timeline area
+                    if not self.video_path or not os.path.exists(self.video_path):
+                        self.video_dropped.emit(local_path)
+                        if hasattr(self, "on_video_dropped") and self.on_video_dropped:
+                            self.on_video_dropped(local_path)
+                    else:
+                        self.add_main_video_clip(local_path, click_t)
                     event.acceptProposedAction()
                     break
             elif ext in [".srt", ".vtt", ".ass", ".ssa", ".txt"]:
@@ -2056,6 +2486,177 @@ class TimelineCanvas(QWidget):
                 self.add_image_overlay(local_path, click_t)
                 event.acceptProposedAction()
                 break
+
+    def add_main_video_clip(self, file_path: str, at_time: float = None) -> dict:
+        """Adds a sequential video clip to Track 1 (Main Video Track)."""
+        from utils.time_utils import get_video_info
+        info = get_video_info(file_path)
+        dur = float(info.get("duration", 0.0))
+        if dur <= 0:
+            dur = 10.0
+
+        self._ensure_video_clips_initialized()
+
+        clip_letter = chr(ord('A') + len(self.video_clips)) if len(self.video_clips) < 26 else str(len(self.video_clips) + 1)
+        base_name = os.path.basename(file_path)
+        clip_name = f"Clip {clip_letter}: {base_name}"
+
+        new_clip = {
+            "id": len(self.video_clips),
+            "path": file_path,
+            "name": clip_name,
+            "start": 0.0,
+            "end": dur,
+            "duration": dur,
+            "timeline_start": 0.0,
+            "width": info.get("width", 1280),
+            "height": info.get("height", 720),
+            "fps": info.get("fps", 30.0)
+        }
+
+        if at_time is not None and self.video_clips:
+            insert_idx = len(self.video_clips)
+            for i, c in enumerate(self.video_clips):
+                c_start = float(c.get("timeline_start", 0.0))
+                c_end = c_start + float(c.get("duration", 0.0))
+                if at_time < c_end:
+                    insert_idx = i + 1
+                    break
+            self.video_clips.insert(insert_idx, new_clip)
+        else:
+            self.video_clips.append(new_clip)
+
+        self._recalculate_video_clips()
+        self.active_video_clip_idx = len(self.video_clips) - 1
+        self.video_clips_modified.emit(self.video_clips)
+        self.update()
+        return new_clip
+
+    def _ensure_video_clips_initialized(self):
+        """Ensures that existing primary video is recorded as clip 0 if video_clips is empty."""
+        if not self.video_clips and self.video_path and os.path.exists(self.video_path):
+            from utils.time_utils import get_video_info
+            info = get_video_info(self.video_path)
+            dur = self.duration or float(info.get("duration", 60.0))
+            self.video_clips.append({
+                "id": 0,
+                "path": self.video_path,
+                "name": f"Clip A: {os.path.basename(self.video_path)}",
+                "start": 0.0,
+                "end": dur,
+                "duration": dur,
+                "timeline_start": 0.0,
+                "width": info.get("width", 1280),
+                "height": info.get("height", 720),
+                "fps": info.get("fps", 30.0)
+            })
+
+    def _recalculate_video_clips(self):
+        """Computes continuous timeline offsets and total duration for all Track 1 video clips."""
+        t = 0.0
+        for i, c in enumerate(self.video_clips):
+            c["id"] = i
+            c["timeline_start"] = round(t, 3)
+            c_dur = float(c.get("duration", max(0.1, float(c.get("end", 0.0)) - float(c.get("start", 0.0)))))
+            c["duration"] = round(c_dur, 3)
+            t += c_dur
+        self.duration = max(1.0, round(t, 3))
+
+    def _delete_video_clip(self, clip_idx: int):
+        if not self.video_clips or not (0 <= clip_idx < len(self.video_clips)):
+            return
+        if len(self.video_clips) <= 1:
+            return
+        self.video_clips.pop(clip_idx)
+        self.active_video_clip_idx = max(0, min(clip_idx, len(self.video_clips) - 1))
+        self._recalculate_video_clips()
+        self.video_clips_modified.emit(self.video_clips)
+        self.update()
+
+    def _move_video_clip(self, clip_idx: int, direction: int):
+        target_idx = clip_idx + direction
+        if not (0 <= clip_idx < len(self.video_clips)) or not (0 <= target_idx < len(self.video_clips)):
+            return
+        self.video_clips[clip_idx], self.video_clips[target_idx] = self.video_clips[target_idx], self.video_clips[clip_idx]
+        self.active_video_clip_idx = target_idx
+        self._recalculate_video_clips()
+        self.video_clips_modified.emit(self.video_clips)
+        self.update()
+
+    def _duplicate_video_clip(self, clip_idx: int):
+        if not (0 <= clip_idx < len(self.video_clips)):
+            return
+        import copy
+        dup = copy.deepcopy(self.video_clips[clip_idx])
+        dup["name"] = f"{dup.get('name', 'Clip')} (Copy)"
+        self.video_clips.insert(clip_idx + 1, dup)
+        self.active_video_clip_idx = clip_idx + 1
+        self._recalculate_video_clips()
+        self.video_clips_modified.emit(self.video_clips)
+        self.update()
+
+    def _prompt_add_video_clip(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Video Clip to Add to Main Track",
+            "",
+            "Video Files (*.mp4 *.mkv *.avi *.mov *.flv *.wmv *.webm *.ts);;All Files (*.*)"
+        )
+        if file_path and os.path.exists(file_path):
+            self.add_main_video_clip(file_path)
+
+    def _show_video_context_menu(self, clip_idx: int, global_pos: QPoint):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a202c;
+                border: 1px solid #2d3748;
+                border-radius: 6px;
+                padding: 4px;
+                color: #e2e8f0;
+            }
+            QMenu::item {
+                padding: 6px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7;
+                color: #ffffff;
+            }
+        """)
+        clips = self.video_clips if self.video_clips else []
+        c = clips[clip_idx] if (clips and 0 <= clip_idx < len(clips)) else None
+        c_name = c.get("name") if c else "Master Video Track"
+        c_dur = float(c.get("duration", self.duration)) if c else self.duration
+        menu.addAction(f"🎬 Video: {c_name} ({format_duration_short(c_dur)})").setEnabled(False)
+        menu.addSeparator()
+
+        act_split = menu.addAction("✂️ Split Video Clip at Playhead (S)")
+        act_split.triggered.connect(self.split_at_playhead)
+
+        act_add = menu.addAction("➕ Add Video Clip to Main Track (បន្ថែម Clip)...")
+        act_add.triggered.connect(self._prompt_add_video_clip)
+
+        if len(clips) > 1:
+            menu.addSeparator()
+            if clip_idx > 0:
+                act_move_left = menu.addAction("◀ Move Clip Earlier (ទៅមុខ)")
+                act_move_left.triggered.connect(lambda: self._move_video_clip(clip_idx, -1))
+            if clip_idx < len(clips) - 1:
+                act_move_right = menu.addAction("▶ Move Clip Later (ទៅក្រោយ)")
+                act_move_right.triggered.connect(lambda: self._move_video_clip(clip_idx, 1))
+
+            act_dup = menu.addAction("📋 Duplicate Video Clip (ចម្លង Clip)")
+            act_dup.triggered.connect(lambda: self._duplicate_video_clip(clip_idx))
+
+            act_del = menu.addAction("🗑️ Delete Video Clip (លុប Clip)")
+            act_del.triggered.connect(lambda: self._delete_video_clip(clip_idx))
+
+        menu.addSeparator()
+        act_kf = menu.addAction("◆ Add Video Keyframe at Playhead")
+        act_kf.triggered.connect(lambda: self.keyframe_added.emit(self.current_time))
+
+        menu.exec(global_pos)
 
     def _seek_from_x(self, x: int, scrubbing: bool = False):
         pixels_per_sec = self.get_pixels_per_sec()
@@ -2490,6 +3091,11 @@ class TimelineCanvas(QWidget):
                 self.delete_selected_subtitles()
                 event.accept()
                 return
+            elif getattr(self, "_hit_track", "") == "video" and getattr(self, "active_video_clip_idx", -1) >= 0:
+                if len(self.video_clips) > 1:
+                    self._delete_video_clip(self.active_video_clip_idx)
+                    event.accept()
+                    return
 
         # Escape clears selection
         if key == Qt.Key.Key_Escape:
@@ -2626,117 +3232,102 @@ class TimelineCanvas(QWidget):
         painter.setClipRect(QRect(hw, ruler_h, w - hw, h - ruler_h))
 
         # --- Track 1: Video Filmstrip Clip(s) ---
-        if self.video_clips and len(self.video_clips) > 1:
-            # Multi-segment video clips
-            for c_idx, clip in enumerate(self.video_clips):
-                c_start_t = float(clip.get("timeline_start", 0.0))
-                c_dur = float(clip.get("duration", 0.0))
-                cx1 = hw + int(c_start_t * pixels_per_sec - self.offset_x)
-                cw = max(4, int(c_dur * pixels_per_sec))
-                if cx1 + cw <= hw or cx1 >= w:
-                    continue
-                draw_x = max(hw, cx1)
-                draw_w = cw - (draw_x - cx1)
-                painter.fillRect(draw_x, v_y + 2, draw_w, v_h - 4, QColor("#1a1e29"))
+        clips_to_draw = self.video_clips if self.video_clips else []
+        if not clips_to_draw and (self.video_path or self.duration > 0):
+            clips_to_draw = [{
+                "id": 0,
+                "path": self.video_path or "",
+                "name": os.path.basename(self.video_path) if self.video_path else "Master Video Track",
+                "start": 0.0,
+                "end": self.duration,
+                "duration": self.duration,
+                "timeline_start": 0.0
+            }]
 
-                c_border = QColor("#f59e0b" if c_idx % 2 == 0 else "#38bdf8")
-                painter.setPen(QPen(c_border, 2))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(cx1, v_y + 2, cw, v_h - 4, 4, 4)
+        active_v_idx = getattr(self, "active_video_clip_idx", 0)
 
-                if draw_w >= 36:
-                    c_name = clip.get("name") or f"Part {c_idx+1:02d}"
-                    c_badge = f"🎬 {c_name} ({format_duration_short(c_dur)})"
-                    painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-                    painter.setPen(QColor("#fef08a"))
-                    painter.drawText(QRect(draw_x + 6, v_y + 4, draw_w - 12, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, c_badge)
-        else:
-            # Single master video clip
-            vid_start_x = hw + int(0 - self.offset_x)
-            vid_w = max(4, int(self.duration * pixels_per_sec))
-            if vid_start_x + vid_w > hw:
-                clip_x = max(hw, vid_start_x)
-                clip_w = vid_w - (clip_x - vid_start_x)
-                # Clip container
-                painter.fillRect(clip_x, v_y + 2, clip_w, v_h - 4, QColor("#1a1e29"))
+        for c_idx, clip in enumerate(clips_to_draw):
+            c_start_t = float(clip.get("timeline_start", 0.0))
+            c_dur = float(clip.get("duration", 0.0))
+            cx1 = hw + int(c_start_t * pixels_per_sec - self.offset_x)
+            cw = max(4, int(c_dur * pixels_per_sec))
+            if cx1 + cw <= hw or cx1 >= w:
+                continue
+            draw_x = max(hw, cx1)
+            draw_w = cw - (draw_x - cx1)
 
-                # Draw Video Filmstrip Thumbnails if available
-                if self.video_thumbnails:
-                    painter.save()
-                    # Clip strictly inside the video container
-                    painter.setClipRect(clip_x, v_y + 2, clip_w, v_h - 4)
+            # 1. Clip base container
+            painter.fillRect(draw_x, v_y + 2, draw_w, v_h - 4, QColor("#141822"))
 
-                    sorted_thumbs = self.video_thumbnails
-                    n_thumbs = len(sorted_thumbs)
-                    thumb_w = 72
-                    clip_end_x = vid_start_x + vid_w
-
-                    for idx in range(n_thumbs):
-                        t_val, pix = sorted_thumbs[idx]
+            # 2. Filmstrip thumbnails or sprockets
+            painter.save()
+            painter.setClipRect(draw_x, v_y + 2, draw_w, v_h - 4)
+            if self.video_thumbnails:
+                sorted_thumbs = self.video_thumbnails
+                n_thumbs = len(sorted_thumbs)
+                thumb_w = 72
+                clip_end_x = cx1 + cw
+                for idx in range(n_thumbs):
+                    t_val, pix = sorted_thumbs[idx]
+                    if c_start_t <= t_val <= c_start_t + c_dur:
                         tx = hw + int(t_val * pixels_per_sec - self.offset_x)
-
-                        # End of current shot / scene
                         if idx + 1 < n_thumbs:
                             next_t, _ = sorted_thumbs[idx + 1]
-                            next_tx = hw + int(next_t * pixels_per_sec - self.offset_x)
+                            next_tx = min(clip_end_x, hw + int(next_t * pixels_per_sec - self.offset_x))
                         else:
                             next_tx = clip_end_x
-
-                        # Skip if entirely out of viewport
                         if next_tx < hw or tx > w:
                             continue
-
-                        # When zoomed out or span <= thumb_w, draw single thumbnail
                         if next_tx <= tx + thumb_w:
                             painter.drawPixmap(tx, v_y + 2, pix)
                         else:
-                            # Continuous filmstrip: tile the thumbnail across [tx, next_tx)
-                            # so there are ZERO black voids!
                             tile_x = max(tx, hw - thumb_w)
                             while tile_x < next_tx and tile_x < w:
                                 painter.drawPixmap(tile_x, v_y + 2, pix)
                                 tile_x += thumb_w
+            else:
+                painter.setPen(QColor("#2d3748"))
+                for sp_x in range(draw_x, min(w, draw_x + draw_w), 22):
+                    painter.fillRect(sp_x, v_y + 3, 8, 4, QColor("#2d3748"))
+                    painter.fillRect(sp_x, v_y + v_h - 7, 8, 4, QColor("#2d3748"))
+            painter.restore()
 
-                        # Crisp 1px scene boundary line between shots
-                        if hw <= next_tx <= w and idx + 1 < n_thumbs:
-                            painter.setPen(QPen(QColor(15, 23, 42, 220), 1.5))
-                            painter.drawLine(next_tx, v_y + 2, next_tx, v_y + v_h - 2)
-
-                    painter.restore()
-                else:
-                    # Decorative filmstrip sprockets
-                    painter.setPen(QColor("#334155"))
-                    for sp_x in range(clip_x, min(w, clip_x + clip_w), 22):
-                        painter.fillRect(sp_x, v_y + 3, 8, 4, QColor("#334155"))
-                        painter.fillRect(sp_x, v_y + v_h - 7, 8, 4, QColor("#334155"))
-
-                # Golden / Amber Border
-                painter.setPen(QPen(QColor("#f59e0b"), 2))
+            # 3. Clip border and selection highlight
+            is_active_clip = (c_idx == active_v_idx)
+            if is_active_clip:
+                # Active selected video clip: Glowing Cyan Border + White Handles
+                painter.setPen(QPen(QColor("#38bdf8"), 2.2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(vid_start_x, v_y + 2, vid_w, v_h - 4, 6, 6)
+                painter.drawRoundedRect(cx1, v_y + 2, cw, v_h - 4, 3, 3)
 
-                # Draw Master Video duration badge
-                if clip_w >= 80:
-                    v_title = os.path.basename(self.video_path) if self.video_path else "Master Video"
-                    if len(v_title) > 24:
-                        v_title = v_title[:21] + "..."
-                    v_badge_txt = f"🎬 {v_title} (⏱️ {format_duration_short(self.duration)})"
-                    painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-                    fm = painter.fontMetrics()
-                    v_bw = min(clip_w - 24, fm.horizontalAdvance(v_badge_txt) + 16)
-                    v_bx = clip_x + 14
-                    v_by = v_y + 6
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QBrush(QColor(15, 23, 42, 210)))
-                    painter.drawRoundedRect(v_bx, v_by, v_bw, 20, 4, 4)
-                    painter.setPen(QColor("#fef08a"))
-                    painter.drawText(QRect(v_bx, v_by, v_bw, 20), Qt.AlignmentFlag.AlignCenter, v_badge_txt)
+                # White handles on ends
+                if cw >= 28:
+                    self._draw_white_handle(painter, cx1, v_y + 2, v_h - 4)
+                    self._draw_white_handle(painter, cx1 + cw - 12, v_y + 2, v_h - 4)
+            else:
+                c_border = QColor("#f59e0b" if c_idx % 2 == 0 else "#0ea5e9")
+                painter.setPen(QPen(c_border, 1.8))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(cx1, v_y + 2, cw, v_h - 4, 3, 3)
 
-                # Left & Right Golden Trim Handles with notch
-                if vid_start_x >= hw - 12:
-                    self._draw_golden_handle(painter, vid_start_x, v_y + 2, v_h - 4, is_left=True)
-                if vid_start_x + vid_w <= w + 12:
-                    self._draw_golden_handle(painter, vid_start_x + vid_w - 12, v_y + 2, v_h - 4, is_left=False)
+            # 4. Badge & Text
+            if draw_w >= 40:
+                c_letter = chr(ord('A') + c_idx) if c_idx < 26 else str(c_idx + 1)
+                raw_name = clip.get("name") or (os.path.basename(clip.get("path", "")) if clip.get("path") else f"Clip {c_letter}")
+                c_badge = f"🎬 [{c_letter}] {raw_name} ({format_duration_short(c_dur)})"
+                painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                fm = painter.fontMetrics()
+                b_offset = 16 if (is_active_clip and cw >= 28) else 8
+                b_w = min(draw_w - b_offset - 6, fm.horizontalAdvance(c_badge) + 12)
+                painter.fillRect(draw_x + b_offset, v_y + 5, b_w, 18, QColor(15, 23, 42, 210))
+                painter.setPen(QColor("#fef08a" if is_active_clip else "#e2e8f0"))
+                painter.drawText(QRect(draw_x + b_offset + 4, v_y + 5, b_w - 8, 18),
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, c_badge)
+
+            # 5. Scene Boundary divider
+            if c_idx > 0 and cx1 >= hw and cx1 <= w:
+                painter.setPen(QPen(QColor("#ffffff"), 2.0))
+                painter.drawLine(cx1, v_y + 1, cx1, v_y + v_h - 1)
 
         # Draw Video Keyframe Diamond Markers (◆) on Video Track
         if getattr(self, "video_keyframes", None):
@@ -2755,7 +3346,7 @@ class TimelineCanvas(QWidget):
                 s = sub.get("start", 0.0)
                 e = sub.get("end", 0.0)
                 bx = hw + int(s * pixels_per_sec - self.offset_x)
-                bw = max(14, int((e - s) * pixels_per_sec))
+                bw = max(20, int((e - s) * pixels_per_sec))
 
                 if bx + bw < hw or bx > w:
                     continue
@@ -2780,22 +3371,35 @@ class TimelineCanvas(QWidget):
                     border_color = QColor("#38bdf8")
                     border_w = 1.2
 
+                # Sharp rectangular clip - NO border radius
                 painter.setPen(QPen(border_color, border_w))
                 painter.setBrush(QBrush(bg_color))
-                painter.drawRoundedRect(bx, item_y, bw, item_h, 8, 8)
+                painter.drawRect(bx, item_y, bw, item_h)
 
-                # Dialogue Text + Duration in minutes
-                txt = sub.get("khmer_text") or sub.get("orig_text") or sub.get("text") or ""
-                dur_str = format_duration_short(e - s)
-                label_text = f"#{idx+1} {txt} ({dur_str})"
-                if bw > 36:
+                # White Trim Handles [ 0 ] & Text - only visible when hovered, selected, or actively trimming
+                is_sub_hovered = bool(self._hover_clip_info and self._hover_clip_info.get("type") == "cc" and self._hover_clip_info.get("idx") == idx)
+                is_sub_trimming = (self._interaction_mode in ("trim_sub_left", "trim_sub_right") and getattr(self, "_active_sub_idx", -1) == idx)
+
+                # Dialogue Text: Default hidden; visible only when hovered, selected, or trimming
+                if is_sub_hovered or is_selected or is_sub_trimming:
+                    txt = sub.get("khmer_text") or sub.get("orig_text") or sub.get("text") or ""
+                    dur_str = format_duration_short(e - s)
+                    label_text = f"#{idx+1} {txt} ({dur_str})"
+
+                    painter.save()
+                    painter.setClipRect(bx + 1, item_y + 1, bw - 2, item_h - 2)
                     painter.setPen(QColor("#ffffff"))
-                    painter.drawText(bx + 18, item_y + 22, label_text[:38])
+                    # Offset text to prevent overlapping with white handles
+                    text_x = bx + 14 if bw >= 28 else bx + 4
+                    if bw >= 50:
+                        painter.drawText(text_x, item_y + 22, label_text)
+                    elif bw >= 20:
+                        painter.drawText(text_x, item_y + 22, f"#{idx+1}")
+                    painter.restore()
 
-                # White Trim Handles [ | ]
-                if bw >= 28:
-                    self._draw_white_handle(painter, bx + 2, item_y, item_h)
-                    self._draw_white_handle(painter, bx + bw - 12, item_y, item_h)
+                if (is_sub_hovered or is_selected or is_sub_trimming) and bw >= 28:
+                    self._draw_white_handle(painter, bx + 1, item_y, item_h)
+                    self._draw_white_handle(painter, bx + bw - 11, item_y, item_h)
 
         # --- Track 3: Audio Voice Dubbing & Dropped Music Tracks ---
         audio_items = self._get_audio_items_for_timeline()
@@ -2804,7 +3408,7 @@ class TimelineCanvas(QWidget):
                 s = a_it["start"]
                 e = a_it["end"]
                 ax = hw + int(s * pixels_per_sec - self.offset_x)
-                aw = max(14, int((e - s) * pixels_per_sec))
+                aw = max(20, int((e - s) * pixels_per_sec))
 
                 if ax + aw < hw or ax > w:
                     continue
@@ -2817,6 +3421,7 @@ class TimelineCanvas(QWidget):
                 sub_idx = a_it.get("sub_idx", -1)
                 is_selected = (not is_track and ((sub_idx in self.selected_indices) or (sub_idx == self.active_sub_idx))) or (is_track and (idx == getattr(self, "_active_audio_track_idx", -1)))
                 is_active = (s <= self.current_time <= e)
+                has_audio = a_it.get("has_audio", False)
 
                 # Smooth slate blue / emerald pill fill & border matching screenshot
                 if is_track:
@@ -2859,32 +3464,51 @@ class TimelineCanvas(QWidget):
                         aborder_w = 1.8
                     else:
                         if is_female:
-                            abg = QColor("#4c0519")
-                            aborder = QColor("#be185d")
+                            abg = QColor("#831843")
+                            aborder = QColor("#f472b6")
                         elif is_kid:
-                            abg = QColor("#451a03")
-                            aborder = QColor("#b45309")
+                            abg = QColor("#78350f")
+                            aborder = QColor("#fbbf24")
                         elif is_spk:
-                            abg = QColor("#3b0764")
-                            aborder = QColor("#7e22ce")
+                            abg = QColor("#581c87")
+                            aborder = QColor("#c084fc")
                         elif "ប្រុស" in actor or "Male" in actor:
-                            abg = QColor("#082f49")
-                            aborder = QColor("#0284c7")
+                            abg = QColor("#0369a1")
+                            aborder = QColor("#38bdf8")
                         else:
-                            abg = QColor("#0f172a")
-                            aborder = QColor("#334155")
+                            abg = QColor("#1e293b")
+                            aborder = QColor("#64748b")
                         aborder_w = 1.4
 
-                painter.setPen(QPen(aborder, aborder_w))
+                # For dub clips: if not file color -50% (50% dimmed opacity); if have file color full!
+                if not has_audio and not is_track:
+                    abg = QColor(abg.red(), abg.green(), abg.blue(), 85)  # -50% dimmed opacity
+                    aborder = QColor(aborder.red(), aborder.green(), aborder.blue(), 110)
+                    border_pen = QPen(aborder, 1.0, Qt.PenStyle.DashLine)
+                else:
+                    # Full vibrant color (100% full opacity)
+                    border_pen = QPen(aborder, aborder_w, Qt.PenStyle.SolidLine)
+
+                # Sharp rectangular clip - NO border radius
+                painter.setPen(border_pen)
                 painter.setBrush(QBrush(abg))
-                painter.drawRoundedRect(ax, item_y, aw, item_h, 8, 8)
+                painter.drawRect(ax, item_y, aw, item_h)
 
                 # Audio Waveform Amplitude Bars
                 wave_step = 3
                 center_y = item_y + item_h // 2
                 is_fem = (not is_track and ("ស្រី" in a_it.get("actor", "") or a_it.get("gender") == "female"))
-                wave_color = QColor("#facc15" if is_selected else ("#a7f3d0" if is_track else ("#fbcfe8" if is_fem else "#bae6fd")))
-                painter.setPen(QPen(wave_color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+
+                if not has_audio and not is_track:
+                    # Waveform dimmed by -50% for lines waiting to be dubbed
+                    dim_c = QColor("#fbcfe8" if is_fem else "#bae6fd")
+                    wave_color = QColor(dim_c.red(), dim_c.green(), dim_c.blue(), 65)
+                    painter.setPen(QPen(wave_color, 1.2, Qt.PenStyle.DashLine))
+                else:
+                    # Full bright color waveform
+                    wave_color = QColor("#facc15" if is_selected else ("#a7f3d0" if is_track else ("#f472b6" if is_fem else "#38bdf8")))
+                    painter.setPen(QPen(wave_color, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+
                 start_bar_x = ax + (15 if aw >= 32 else 4)
                 end_bar_x = ax + aw - (15 if aw >= 32 else 4)
 
@@ -2911,37 +3535,36 @@ class TimelineCanvas(QWidget):
                         from services.dubbing.audio_effects import get_voice_effect_icon
                         fx_txt = f" ✨{get_voice_effect_icon(cur_fx)}{cur_fx}"
 
-                    if is_track:
-                        name_txt = a_it.get("name", "Audio")
-                        if len(name_txt) > 18:
-                            name_txt = name_txt[:16] + ".."
-                        a_label = f"🎵 {name_txt} (⏱️ {dur_str}{vol_txt}{spd_txt}{fx_txt})"
+                    # Status badge text
+                    if not has_audio and not is_track:
+                        status_tag = " (⏳ No Audio)"
                     else:
-                        actor_txt = a_it.get("actor") or "Voice"
-                        if len(actor_txt) > 12:
-                            actor_txt = actor_txt[:10] + ".."
-                        name_txt = a_it.get("name", "Line")
-                        if len(name_txt) > 14:
-                            name_txt = name_txt[:12] + ".."
-                        has_aud = a_it.get("has_audio", False)
-                        aud_icon = "🔊" if has_aud else "🎙️"
-                        a_label = f"{aud_icon} [{actor_txt}] {name_txt} (⏱️ {dur_str}{vol_txt}{spd_txt}{fx_txt})"
+                        status_tag = ""
 
-                    painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-                    fm = painter.fontMetrics()
-                    a_bw = min(aw - 28, fm.horizontalAdvance(a_label) + 12)
-                    a_bx = ax + 14
-                    a_by = item_y + 3
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QBrush(QColor(10, 15, 30, 180)))
-                    painter.drawRoundedRect(a_bx, a_by, a_bw, item_h - 6, 3, 3)
-                    painter.setPen(QColor("#ffffff"))
-                    painter.drawText(QRect(a_bx, a_by, a_bw, item_h - 6), Qt.AlignmentFlag.AlignCenter, a_label)
+                    # Audio Trim Handles [ 0 ] & Label - only visible when hovered, selected, or actively trimming
+                    is_aud_hovered = bool(self._hover_clip_info and self._hover_clip_info.get("type") == "audio" and self._hover_clip_info.get("idx") == idx)
+                    is_aud_trimming = (self._interaction_mode in ("trim_aud_left", "trim_aud_right") and getattr(self, "_active_audio_idx", -1) == idx)
 
-                # White Trim Handles [ | ]
-                if aw >= 28:
-                    self._draw_white_handle(painter, ax + 2, item_y, item_h)
-                    self._draw_white_handle(painter, ax + aw - 12, item_y, item_h)
+                    # Audio Label: Default hidden; visible only on hover, selection, or trimming
+                    if is_aud_hovered or is_selected or is_aud_trimming:
+                        voice_label = a_it.get("voice_name") or a_it.get("actor") or "Voice"
+                        a_label = f"🎵 #{sub_idx+1 if not is_track else idx+1} {voice_label} ({dur_str}){vol_txt}{spd_txt}{fx_txt}{status_tag}"
+
+                        painter.save()
+                        painter.setClipRect(ax + 1, item_y + 1, aw - 2, item_h - 2)
+                        painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                        if not has_audio and not is_track:
+                            painter.setPen(QColor(255, 255, 255, 140))  # Dimmed text -50%
+                        else:
+                            painter.setPen(QColor("#ffffff"))  # Full white text
+                        text_x = ax + 14 if aw >= 28 else ax + 4
+                        painter.drawText(text_x, item_y + 14, a_label)
+                        painter.restore()
+
+                    # White Trim Handles [ 0 ] - only visible when hovered, selected, or actively trimming
+                    if (is_aud_hovered or is_selected or is_aud_trimming) and aw >= 28:
+                        self._draw_white_handle(painter, ax + 1, item_y, item_h)
+                        self._draw_white_handle(painter, ax + aw - 11, item_y, item_h)
 
         # --- Track 4: Overlays & Shapes Track ---
         if self.overlay_clips and self.is_overlay_visible:
@@ -2949,7 +3572,7 @@ class TimelineCanvas(QWidget):
             for idx, item in enumerate(self.overlay_clips):
                 st, et = self._get_overlay_time_span(item)
                 ox = hw + int(st * pixels_per_sec - self.offset_x)
-                ow = max(14, int((et - st) * pixels_per_sec))
+                ow = max(20, int((et - st) * pixels_per_sec))
 
                 if ox + ow < hw or ox > w:
                     continue
@@ -2962,7 +3585,7 @@ class TimelineCanvas(QWidget):
                 is_selected = (idx == self.active_overlay_idx)
                 is_active = (st <= self.current_time <= et)
 
-                # Violet / Purple Pill Container matching screenshot
+                # Violet / Purple Container - Sharp edges (No border radius)
                 if is_selected:
                     bg_col = QColor("#7c3aed")
                     border_col = QColor("#facc15")
@@ -2978,31 +3601,35 @@ class TimelineCanvas(QWidget):
 
                 painter.setPen(QPen(border_col, border_w))
                 painter.setBrush(QBrush(bg_col))
-                painter.drawRoundedRect(ox, item_y, ow, item_h, 8, 8)
+                painter.drawRect(ox, item_y, ow, item_h)
 
-                # Translucent label badge inside with duration
-                if ow >= 32:
+                # White Trim Handles [ 0 ] & Label - only visible when hovered, selected, or actively trimming
+                is_ov_hovered = bool(self._hover_clip_info and self._hover_clip_info.get("type") == "overlay" and self._hover_clip_info.get("idx") == idx)
+                is_ov_trimming = (self._interaction_mode in ("trim_ov_left", "trim_ov_right") and getattr(self, "_active_ov_idx", -1) == idx)
+
+                # Translucent label badge inside: Default hidden; visible only on hover, selection, or trimming
+                if (is_ov_hovered or is_selected or is_ov_trimming) and ow >= 32:
                     dur_str = format_duration_short(et - st)
                     raw_name = iname if iname else itype.title()
                     display_name = f"{raw_name} ({dur_str})"
                     fm = painter.fontMetrics()
                     txt_w = fm.horizontalAdvance(display_name)
-                    badge_w = min(ow - 28, txt_w + 14)
-                    badge_x = ox + 14
+                    badge_w = min(ow - 26, txt_w + 14)
+                    badge_x = ox + 14 if ow >= 28 else ox + 6
                     badge_y = item_y + 4
                     badge_h = item_h - 8
 
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(QBrush(QColor(20, 10, 45, 110)))
-                    painter.drawRoundedRect(badge_x, badge_y, badge_w, badge_h, 4, 4)
+                    painter.drawRect(badge_x, badge_y, badge_w, badge_h)
 
                     painter.setPen(QColor("#ffffff"))
                     painter.drawText(QRect(badge_x, badge_y, badge_w, badge_h), Qt.AlignmentFlag.AlignCenter, display_name)
 
-                # White Trim Handles [ | ]
-                if ow >= 28:
-                    self._draw_white_handle(painter, ox + 2, item_y, item_h)
-                    self._draw_white_handle(painter, ox + ow - 12, item_y, item_h)
+                # White Trim Handles [ 0 ] - only visible when hovered, selected, or actively trimming
+                if (is_ov_hovered or is_selected or is_ov_trimming) and ow >= 28:
+                    self._draw_white_handle(painter, ox + 1, item_y, item_h)
+                    self._draw_white_handle(painter, ox + ow - 11, item_y, item_h)
 
         # --- Playhead Vertical Needle Line ---
         px = hw + int(self.current_time * pixels_per_sec - self.offset_x)
@@ -3065,11 +3692,16 @@ class TimelineCanvas(QWidget):
             painter.restore()
 
         # Row 1: Video Track Header
-        self._draw_camera_icon(painter, 12, v_y + (v_h - 18) // 2, QColor("#94a3b8"))
+        self._draw_camera_icon(painter, 6, v_y + (v_h - 18) // 2, QColor("#94a3b8"))
         v_btn = btn_rects["video_eye"]
         _draw_hdr_btn(v_btn, self._hovered_header_btn == "video_eye")
-        self._draw_eye_icon(painter, v_btn.x() + 5, v_btn.y() + 6, self.is_video_visible,
+        self._draw_eye_icon(painter, v_btn.x() + 3, v_btn.y() + 5, self.is_video_visible,
                             QColor("#a5b4fc" if self.is_video_visible else "#64748b"))
+
+        if "video_add" in btn_rects:
+            v_add_btn = btn_rects["video_add"]
+            _draw_hdr_btn(v_add_btn, self._hovered_header_btn == "video_add")
+            self._draw_plus_icon(painter, v_add_btn.x() + 4, v_add_btn.y() + 5, QColor("#38bdf8"))
 
         # Row 2: CC Subtitles Track Header
         self._draw_cc_icon(painter, 12, cc_y + (lane_h - 18) // 2, QColor("#94a3b8"))
@@ -3102,4 +3734,81 @@ class TimelineCanvas(QWidget):
             painter.setBrush(QBrush(QColor(56, 189, 248, 160 if getattr(self, "_is_dragging_v_scrollbar", False) else 100)))
             painter.drawRoundedRect(thumb_rect, 3, 3)
 
+        # ---------------- 4. ANIMATED HOVER NEEDLE & FLOATING FILE PREVIEW HUD CARD ----------------
+        if not self._interaction_mode and getattr(self, "_hover_pos", None) and self._hover_pos.x() >= hw:
+            self._draw_hover_animation_and_preview(painter)
+
         painter.end()
+
+    def _draw_hover_animation_and_preview(self, painter: QPainter):
+        """
+        Renders animated clip glow, cursor hover time needle, and
+        a sleek glassmorphism floating preview HUD card showing file details.
+        """
+        if not self._hover_pos or self._hover_pos.x() < self.HEADER_W:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        hw = self.HEADER_W
+        w = self.width()
+        h = self.height()
+        pos_x = self._hover_pos.x()
+        pos_y = self._hover_pos.y()
+        pps = self.get_pixels_per_sec()
+        hover_t = max(0.0, (pos_x - hw + self.offset_x) / pps)
+
+        # 1. Cursor Hover Guide Needle
+        painter.setPen(QPen(QColor(56, 189, 248, 120), 1.0, Qt.PenStyle.DashLine))
+        painter.drawLine(pos_x, 24, pos_x, h)
+
+        # Small Time Pill in Ruler
+        t_str = format_compact_time(hover_t)
+        painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        fm = painter.fontMetrics()
+        pill_w = fm.horizontalAdvance(t_str) + 12
+        pill_x = max(hw + 2, min(w - pill_w - 2, pos_x - pill_w // 2))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(15, 23, 42, 230)))
+        painter.drawRoundedRect(pill_x, 3, pill_w, 18, 4, 4)
+        painter.setPen(QColor("#38bdf8"))
+        painter.drawText(QRect(pill_x, 3, pill_w, 18), Qt.AlignmentFlag.AlignCenter, t_str)
+
+        # 2. Animated Clip Breathing Glow (if hovering over a clip)
+        info = self._hover_clip_info
+        if info and "rect" in info:
+            clip_rect = info["rect"]
+            clip_type = info.get("type", "clip")
+
+            # Pulse factor: 0.0 to 1.0
+            pulse = (math.sin(self._hover_anim_phase) + 1.0) / 2.0
+            glow_w = 2.0 + pulse * 1.5
+
+            if clip_type == "video":
+                c_accent = QColor("#f59e0b")
+                tag_label = "VIDEO"
+                tag_bg = QColor(245, 158, 11, 45)
+                icon_sym = "🎬"
+            elif clip_type == "audio":
+                c_accent = QColor("#10b981")
+                tag_label = "AUDIO"
+                tag_bg = QColor(16, 185, 129, 45)
+                icon_sym = "🎵"
+            elif clip_type == "cc":
+                c_accent = QColor("#38bdf8")
+                tag_label = "SUBTITLE"
+                tag_bg = QColor(56, 189, 248, 45)
+                icon_sym = "💬"
+            else:
+                c_accent = QColor("#a855f7")
+                tag_label = "OVERLAY"
+                tag_bg = QColor(168, 85, 247, 45)
+                icon_sym = "🎨"
+
+            # Draw sharp glowing outer border around the clip (no rounded corners)
+            glow_rect = clip_rect.adjusted(-1, -1, 1, 1)
+            painter.setPen(QPen(c_accent, glow_w))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(glow_rect)
+
+        painter.restore()

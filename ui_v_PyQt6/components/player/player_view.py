@@ -134,8 +134,10 @@ class PlayerView(QWidget):
     - Subtitle overlay rendered cleanly in the lower third
     - Multi-track timeline synchronization
     """
+    video_selected = Signal(str)
     video_dropped = Signal(str)
     subtitle_dropped = Signal(str)
+    audio_dropped = Signal(str)
     lut_dropped = Signal(str)
     speed_changed = Signal(float)
     item_selected = Signal(object)
@@ -174,6 +176,8 @@ class PlayerView(QWidget):
         self.playback_speed = 1.0
         self._is_seeking = False
         self.subtitles = []
+        self.video_clips = []
+        self._active_cap_path = None
         # Audio playback controlled dynamically by Multi-Track Audio Mix
         self.auto_dub_on_play = True
 
@@ -253,11 +257,13 @@ class PlayerView(QWidget):
 
         # Connect canvas signals
         self.canvas.item_selected.connect(self.item_selected.emit)
+        self.canvas.video_selected.connect(self.video_selected.emit)
         self.canvas.item_added.connect(self._on_canvas_item_added)
         self.canvas.item_deleted.connect(self._on_canvas_item_deleted)
         self.canvas.canvas_modified.connect(self._on_canvas_modified)
         self.canvas.video_dropped.connect(self.video_dropped.emit)
         self.canvas.subtitle_dropped.connect(self.subtitle_dropped.emit)
+        self.canvas.audio_dropped.connect(self._on_canvas_audio_dropped)
         self.canvas.lut_dropped.connect(self.lut_dropped.emit)
 
         prev_layout.addWidget(self.canvas, 1)
@@ -312,6 +318,7 @@ class PlayerView(QWidget):
 
         # ---------------- 2. PROFESSIONAL NLE TRANSPORT & PLAYBACK BAR (CAPCUT / PREMIERE STYLE) ----------------
         control_card = QFrame()
+        self.control_card = control_card
         control_card.setObjectName("player_transport_card")
         control_card.setStyleSheet("""
             QFrame#player_transport_card {
@@ -378,11 +385,13 @@ class PlayerView(QWidget):
         row2_transport = QHBoxLayout()
         row2_transport.setContentsMargins(4, 2, 4, 2)
         row2_transport.setSpacing(6)
+        self.row2_transport = row2_transport
 
         # 1. LEFT: Cue Index Pill & Digital Timecode
         tools_left = QHBoxLayout()
         tools_left.setSpacing(6)
         tools_left.setContentsMargins(0, 0, 0, 0)
+        self.tools_left = tools_left
 
         self.btn_cue_nav = None
 
@@ -408,6 +417,7 @@ class PlayerView(QWidget):
         transport_cluster = QHBoxLayout()
         transport_cluster.setSpacing(4)
         transport_cluster.setContentsMargins(0, 0, 0, 0)
+        self.transport_cluster = transport_cluster
 
         nav_btn_style = """
             QPushButton {
@@ -503,6 +513,7 @@ class PlayerView(QWidget):
         tools_right = QHBoxLayout()
         tools_right.setSpacing(6)
         tools_right.setContentsMargins(0, 0, 0, 0)
+        self.tools_right = tools_right
 
         self.btn_kf_prev = None
         self.btn_kf_add = None
@@ -532,6 +543,30 @@ class PlayerView(QWidget):
         """)
         self.btn_quick_aspect.clicked.connect(self._show_quick_aspect_menu)
         tools_right.addWidget(self.btn_quick_aspect)
+
+        # Modern Playback Speed Control Button: [ 1x ∨ ]
+        self.btn_play_speed = QPushButton("1x ∨")
+        self.btn_play_speed.setFixedHeight(26)
+        self.btn_play_speed.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_play_speed.setToolTip("Video Speed Control (ល្បឿនចាក់វីដេអូ 0.5x - 2.0x)")
+        self.btn_play_speed.setStyleSheet("""
+            QPushButton {
+                background: #141923;
+                border: 1px solid #283344;
+                border-radius: 5px;
+                color: #f59e0b;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background: #1e2636;
+                border: 1px solid #f59e0b;
+                color: #ffffff;
+            }
+        """)
+        self.btn_play_speed.clicked.connect(self._show_speed_popup)
+        tools_right.addWidget(self.btn_play_speed)
 
         # Quick CC Subtitle Visibility Toggle [ 💬 CC ]
         self.btn_transport_cc = QPushButton("CC")
@@ -702,6 +737,12 @@ class PlayerView(QWidget):
             self.canvas.update()
 
     # ------------------ SPEED & AUTO-DUB STATE ------------------
+    def _show_speed_popup(self):
+        from ui_v_PyQt6.components.player.speed_control_widget import ModernSpeedDialog
+        dlg = ModernSpeedDialog(current_speed=self.playback_speed, parent=self)
+        dlg.speed_changed.connect(self.set_playback_speed)
+        dlg.popup_near(self.btn_play_speed)
+
     def _on_speed_changed(self, text: str):
         try:
             cleaned = text.replace("x", "").replace("X", "").strip()
@@ -713,6 +754,15 @@ class PlayerView(QWidget):
 
     def set_playback_speed(self, speed: float):
         self.playback_speed = speed
+        if hasattr(self, "btn_play_speed") and self.btn_play_speed:
+            is_wide = self.width() >= 520 if hasattr(self, "width") else True
+            if abs(speed - round(speed)) < 0.01:
+                txt = f"{int(round(speed))}x"
+            elif abs(speed * 10 - round(speed * 10)) < 0.01:
+                txt = f"{speed:.1f}x"
+            else:
+                txt = f"{speed:.2f}x"
+            self.btn_play_speed.setText(f"{txt} ∨" if is_wide else txt)
         if hasattr(self, "combo_play_speed") and self.combo_play_speed:
             txt = f"{speed:.1f}x" if speed != 1.25 else "1.25x"
             self.combo_play_speed.blockSignals(True)
@@ -734,34 +784,79 @@ class PlayerView(QWidget):
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 24.0
         frame_count = self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1
         self.duration = frame_count / self.fps
+        vw = 1280
+        vh = 720
+        if self.cap:
+            vw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+            vh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+
         if hasattr(self, "canvas") and self.canvas:
             self.canvas.duration = self.duration
             self.canvas.current_time = 0.0
+            self.canvas.set_video_dimensions(vw, vh, auto_fit=True)
+            if hasattr(self, "btn_quick_aspect"):
+                mode = getattr(self.canvas, "aspect_ratio_mode", "16:9")
+                lbl_map = {"16:9": "16:9 ∨", "9:16": "9:16 ∨", "1:1": "1:1 ∨", "4:5": "4:5 ∨", "21:9": "21:9 ∨", "fit": "Fit ∨"}
+                self.btn_quick_aspect.setText(lbl_map.get(mode, f"{vw}x{vh} ∨"))
 
-        if hasattr(self, "monitor_header") and self.monitor_header and self.cap:
-            vw = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
-            vh = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        if hasattr(self, "monitor_header") and self.monitor_header:
             self.monitor_header.set_dimensions(vw, vh)
+
+        self._active_cap_path = video_path
+        self.video_clips = [{
+            "id": 0,
+            "path": video_path,
+            "name": os.path.basename(video_path),
+            "start": 0.0,
+            "end": self.duration,
+            "duration": self.duration,
+            "timeline_start": 0.0
+        }]
 
         if self.timeline_editor:
             self.timeline_editor.set_duration(self.duration)
             self.timeline_editor.set_data(
-                video_clips=[{"path": video_path, "duration": self.duration}],
+                video_clips=self.video_clips,
                 video_path=video_path
             )
         elif self.timeline:
             self.timeline.set_duration(self.duration)
             self.timeline.set_data(
-                video_clips=[{"path": video_path, "duration": self.duration}],
+                video_clips=self.video_clips,
                 video_path=video_path
             )
 
         self.seek(0.0)
 
+    def get_clip_at_time(self, t: float):
+        """Returns (clip_dict, local_time_sec) for video playback/seeking across multiple video clips"""
+        clips = getattr(self, "video_clips", None)
+        if not clips or len(clips) == 0:
+            return {"path": self.video_path, "start": 0.0, "end": self.duration, "duration": self.duration}, t
+        for c in clips:
+            c_st = float(c.get("timeline_start", 0.0))
+            c_dur = float(c.get("duration", 0.0))
+            if c_st <= t < c_st + c_dur:
+                local_t = float(c.get("start", 0.0)) + (t - c_st)
+                return c, local_t
+        last = clips[-1]
+        return last, float(last.get("end", last.get("duration", 0.0)))
+
     def read_next_frame(self) -> bool:
         """Reads the next frame sequentially without seeking, eliminating H.264 NAL errors and stutter"""
         if getattr(self, "_is_seeking", False) or not self.cap or not self.cap.isOpened():
             return True
+
+        # Check multi-clip boundary transition during continuous playback
+        if getattr(self, "video_clips", None) and len(self.video_clips) > 1:
+            target_clip, local_t = self.get_clip_at_time(self.current_time)
+            clip_path = (target_clip.get("path") if target_clip else None) or self.video_path
+            if clip_path and clip_path != getattr(self, "_active_cap_path", None) and os.path.exists(clip_path):
+                if self.cap:
+                    self.cap.release()
+                self.cap = cv2.VideoCapture(clip_path)
+                self._active_cap_path = clip_path
+                self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, local_t * 1000.0))
 
         # If fast-forwarding >= 2.0x on high-fps media, skip 1 frame via fast grab to ensure real-time speed
         speed = getattr(self, "playback_speed", 1.0)
@@ -772,7 +867,9 @@ class PlayerView(QWidget):
         if ret:
             self._last_frame = frame
             pos_msec = self.cap.get(cv2.CAP_PROP_POS_MSEC)
-            if pos_msec > 0:
+            if getattr(self, "video_clips", None) and len(self.video_clips) > 1:
+                self.current_time = min(self.duration, self.current_time + (1.0 / max(1.0, self.fps)))
+            elif pos_msec > 0:
                 self.current_time = pos_msec / 1000.0
             else:
                 self.current_time = min(self.duration, self.current_time + (1.0 / max(1.0, self.fps)))
@@ -809,9 +906,17 @@ class PlayerView(QWidget):
 
             self._update_time_and_slider()
 
+            target_clip, local_t = self.get_clip_at_time(self.current_time)
+            clip_path = (target_clip.get("path") if target_clip else None) or self.video_path
+            if clip_path and clip_path != getattr(self, "_active_cap_path", None) and os.path.exists(clip_path):
+                if self.cap:
+                    self.cap.release()
+                self.cap = cv2.VideoCapture(clip_path)
+                self._active_cap_path = clip_path
+
             if self.cap and self.cap.isOpened():
                 try:
-                    self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, self.current_time * 1000.0))
+                    self.cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, local_t * 1000.0))
                     ret, frame = self.cap.read()
                     if ret:
                         self._last_frame = frame
@@ -869,6 +974,11 @@ class PlayerView(QWidget):
         """Refreshes timeline when an overlay/blur box is deleted."""
         self._sync_canvas_items_to_timeline()
 
+    def _on_canvas_audio_dropped(self, fpath: str):
+        if self.timeline_editor and hasattr(self.timeline_editor, "canvas"):
+            self.timeline_editor.canvas.add_audio_track(fpath, 0.0)
+        self.audio_dropped.emit(fpath)
+
     def _on_canvas_modified(self):
         """Called when user drags, moves, resizes, or rotates items on preview."""
         self._sync_canvas_items_to_timeline()
@@ -906,13 +1016,131 @@ class PlayerView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_responsive_transport_layout(self.width())
         if self._last_frame is not None:
             self._display_frame(self._last_frame)
 
+    def _format_responsive_time(self, curr_sec: float, dur_sec: float) -> str:
+        w = self.width() if hasattr(self, "width") else 600
+
+        def _sec_to_str(s: float, force_hours: bool = False) -> str:
+            s = max(0, int(round(s)))
+            m = s // 60
+            sec = s % 60
+            h = m // 60
+            if h > 0 or force_hours:
+                return f"{h:02d}:{m%60:02d}:{sec:02d}"
+            return f"{m:02d}:{sec:02d}"
+
+        dur_has_hours = dur_sec >= 3600
+
+        if w < 320:
+            # Ultra compact: current time only (e.g. 01:01)
+            return _sec_to_str(curr_sec, dur_has_hours)
+        elif w < 520:
+            # Compact: 01:01 / 04:20 (omits leading 00: if video < 1 hour)
+            c_str = _sec_to_str(curr_sec, dur_has_hours)
+            d_str = _sec_to_str(dur_sec, dur_has_hours)
+            return f"{c_str} / {d_str}"
+        else:
+            # Standard full timecode: 00:01:01 / 00:04:20
+            c_str = _sec_to_str(curr_sec, True)
+            d_str = _sec_to_str(dur_sec, True)
+            return f"{c_str} / {d_str}"
+
+    def _apply_responsive_transport_layout(self, width: int):
+        """
+        Dynamically adapts the transport bar controls and timecode readout
+        for tight/narrow panels when resizing the player view:
+        - Wide (>= 520px): Full 5-button transport, full labels, full timecode
+        - Compact (400px - 519px): Hide outer jump buttons (|<<, >>|), compact timecode
+        - Ultra-compact (< 400px): Hide aspect button, compact speed & cc, short timecode
+        """
+        if not hasattr(self, "btn_first") or not hasattr(self, "btn_last"):
+            return
+
+        is_wide = width >= 520
+        is_medium = 400 <= width < 520
+        is_narrow = width < 400
+        is_ultra_narrow = width < 320
+
+        # 1. Transport Cluster buttons (|<< and >>|)
+        # In medium and narrow modes, hide outer jump buttons to save 64px
+        show_outer_jumps = is_wide
+        if self.btn_first.isVisible() != show_outer_jumps:
+            self.btn_first.setVisible(show_outer_jumps)
+        if self.btn_last.isVisible() != show_outer_jumps:
+            self.btn_last.setVisible(show_outer_jumps)
+
+        # 2. Aspect Ratio button
+        # In ultra-compact mode (< 400px), hide quick aspect button (already accessible in toolbar above)
+        show_aspect = not is_narrow
+        if hasattr(self, "btn_quick_aspect") and self.btn_quick_aspect:
+            if self.btn_quick_aspect.isVisible() != show_aspect:
+                self.btn_quick_aspect.setVisible(show_aspect)
+            mode = getattr(self.canvas, "aspect_ratio_mode", "16:9")
+            if is_wide:
+                self.btn_quick_aspect.setText(f"{mode} ∨")
+            else:
+                self.btn_quick_aspect.setText(mode)
+
+        # 3. Speed button text (strip arrow in compact/narrow mode)
+        if hasattr(self, "btn_play_speed") and self.btn_play_speed:
+            spd = getattr(self, "playback_speed", 1.0)
+            if abs(spd - round(spd)) < 0.01:
+                spd_str = f"{int(round(spd))}x"
+            elif abs(spd * 10 - round(spd * 10)) < 0.01:
+                spd_str = f"{spd:.1f}x"
+            else:
+                spd_str = f"{spd:.2f}x"
+            self.btn_play_speed.setText(f"{spd_str} ∨" if is_wide else spd_str)
+
+        # 4. Spacing and Margins
+        if hasattr(self, "row2_transport") and self.row2_transport:
+            if is_narrow:
+                self.row2_transport.setSpacing(2 if is_ultra_narrow else 3)
+                self.row2_transport.setContentsMargins(2, 2, 2, 2)
+            elif is_medium:
+                self.row2_transport.setSpacing(4)
+                self.row2_transport.setContentsMargins(3, 2, 3, 2)
+            else:
+                self.row2_transport.setSpacing(6)
+                self.row2_transport.setContentsMargins(4, 2, 4, 2)
+
+        if hasattr(self, "transport_cluster") and self.transport_cluster:
+            self.transport_cluster.setSpacing(2 if is_narrow else 4)
+
+        if hasattr(self, "tools_right") and self.tools_right:
+            self.tools_right.setSpacing(2 if is_ultra_narrow else (3 if is_narrow else (4 if is_medium else 6)))
+
+        # 5. Button sizes in narrow modes
+        if is_narrow:
+            if hasattr(self, "btn_prev_cue"): self.btn_prev_cue.setFixedSize(24, 24)
+            if hasattr(self, "btn_play"): self.btn_play.setFixedSize(30, 26)
+            if hasattr(self, "btn_next_cue"): self.btn_next_cue.setFixedSize(24, 24)
+            if hasattr(self, "btn_play_speed"): self.btn_play_speed.setFixedHeight(24)
+            if hasattr(self, "btn_transport_cc"): self.btn_transport_cc.setFixedSize(26, 24)
+            if hasattr(self, "btn_fullscreen"): self.btn_fullscreen.setFixedSize(24, 24)
+            if hasattr(self, "lbl_time"):
+                self.lbl_time.setStyleSheet("font-family: 'Consolas', monospace; font-size: 10px; font-weight: bold; color: #38bdf8; background: transparent;")
+        else:
+            if hasattr(self, "btn_prev_cue"): self.btn_prev_cue.setFixedSize(28, 28)
+            if hasattr(self, "btn_play"): self.btn_play.setFixedSize(36, 30)
+            if hasattr(self, "btn_next_cue"): self.btn_next_cue.setFixedSize(28, 28)
+            if hasattr(self, "btn_play_speed"): self.btn_play_speed.setFixedHeight(26)
+            if hasattr(self, "btn_transport_cc"): self.btn_transport_cc.setFixedSize(32, 26)
+            if hasattr(self, "btn_fullscreen"): self.btn_fullscreen.setFixedSize(28, 26)
+            if hasattr(self, "lbl_time"):
+                self.lbl_time.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px; font-weight: bold; color: #38bdf8; background: transparent;")
+
+        # 6. Re-format time text
+        time_text = self._format_responsive_time(self.current_time, self.duration)
+        if hasattr(self, "lbl_time") and self.lbl_time:
+            self.lbl_time.setText(time_text)
+
     def _update_time_and_slider(self):
-        curr_str = format_timestamp(self.current_time).split(",")[0]
-        dur_str = format_timestamp(self.duration).split(",")[0]
-        self.lbl_time.setText(f"{curr_str} / {dur_str}")
+        time_text = self._format_responsive_time(self.current_time, self.duration)
+        self.lbl_time.setText(time_text)
         self._update_cue_counter()
 
         if not self._is_scrubbing and self.duration > 0:
@@ -1037,6 +1265,14 @@ class PlayerView(QWidget):
         if subtitles is not None:
             self.subtitles = subtitles
             self._update_cue_counter()
+        if video_clips is not None:
+            self.video_clips = video_clips
+            if len(video_clips) > 1:
+                total_dur = sum(float(c.get("duration", 0.0)) for c in video_clips)
+                if total_dur > 0:
+                    self.duration = total_dur
+                    if hasattr(self, "canvas") and self.canvas:
+                        self.canvas.duration = self.duration
         v_path = video_path or self.video_path
         if self.timeline_editor:
             self.timeline_editor.set_data(
@@ -1225,8 +1461,12 @@ class PlayerView(QWidget):
 
     def _set_aspect_from_quick(self, mode: str):
         self.canvas.set_aspect_ratio(mode)
-        lbl_map = {"16:9": "16:9 ∨", "9:16": "9:16 ∨", "1:1": "1:1 ∨", "4:5": "4:5 ∨", "fit": "Fit ∨"}
-        self.btn_quick_aspect.setText(lbl_map.get(mode, "Ratio ∨"))
+        is_wide = self.width() >= 520 if hasattr(self, "width") else True
+        if is_wide:
+            lbl_map = {"16:9": "16:9 ∨", "9:16": "9:16 ∨", "1:1": "1:1 ∨", "4:5": "4:5 ∨", "fit": "Fit ∨"}
+        else:
+            lbl_map = {"16:9": "16:9", "9:16": "9:16", "1:1": "1:1", "4:5": "4:5", "fit": "Fit"}
+        self.btn_quick_aspect.setText(lbl_map.get(mode, mode))
 
     def open_auto_reframe_dialog(self):
         """Opens AI Face Tracking and Auto Reframe (16:9 to 9:16 TikTok) Dialog"""
@@ -1254,3 +1494,4 @@ class PlayerView(QWidget):
             self.monitor_header.combo_ratio.blockSignals(True)
             self.monitor_header.combo_ratio.setCurrentText("9:16 TikTok / Shorts")
             self.monitor_header.combo_ratio.blockSignals(False)
+

@@ -9,8 +9,9 @@ from ui_v_PyQt6.qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, 
     QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, 
     QCheckBox, QFrame, QGroupBox, Qt, QMenu, QInputDialog, QApplication,
-    QPoint, QCursor, QColor, QFont, QIcon, QPainter, QPen, QBrush, QRect,
-    QStyledItemDelegate, QStyle
+    QPoint, QPointF, QCursor, QColor, QFont, QIcon, QPainter, QPen, QBrush, QRect, QRectF,
+    QStyledItemDelegate, QStyle, QMessageBox, QTimer, QRadialGradient, QLinearGradient,
+    Signal, QEvent, QPainterPath
 )
 from ui_v_PyQt6.icons import (
     get_male_icon, get_female_icon, get_users_icon, get_swap_icon,
@@ -19,7 +20,10 @@ from ui_v_PyQt6.icons import (
     get_clock_icon, get_edit_icon, get_sync_icon, get_ai_icon, get_bot_icon,
     get_rewind_icon, get_forward_icon, get_minus_icon, get_folder_icon, get_stop_icon
 )
-from utils import format_timestamp, parse_timestamp_to_seconds
+from utils import (
+    format_timestamp, parse_timestamp_to_seconds,
+    format_compact_time, format_compact_timing_range
+)
 from config import (
     TRANSLATION_PROVIDERS, TRANSLATION_STYLES, WHISPER_MODELS, 
     KHMER_FONT_FAMILY, SPEECH_SPEED_PRESETS, get_installed_khmer_fonts
@@ -57,25 +61,20 @@ class TimelineVoicePillDelegate(QStyledItemDelegate):
 
         sub_info = index.data(Qt.ItemDataRole.UserRole + 1)
         if not sub_info or not isinstance(sub_info, dict):
-            # Fallback: synthesize sub_info from display text or row data so it always renders the timeline pill
-            disp_txt = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-            actor = "តួអង្គ (Dialogue)"
-            try:
-                table = option.widget
-                if table:
-                    c4 = table.item(index.row(), 4)
-                    if c4:
-                        actor = c4.text()
-            except Exception:
-                pass
-            sub_info = {
-                "actor": actor,
-                "gender": "female" if ("ស្រី" in actor or "Female" in actor) else ("male" if ("ប្រុស" in actor or "Male" in actor) else "dialogue"),
-                "voice": "",
-                "has_audio": False,
-                "rate": "+0%",
-                "dur_str": disp_txt if disp_txt and ("s" in disp_txt or ":" in disp_txt) else "2.0s"
-            }
+            painter.setPen(QColor("#475569"))
+            painter.setFont(QFont("Segoe UI", 9))
+            painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, "—")
+            painter.restore()
+            return
+
+        has_audio = sub_info.get("has_audio", False)
+        if not has_audio:
+            # No voice audio generated yet for this subtitle line: show clean subtle dash
+            painter.setPen(QColor("#475569"))
+            painter.setFont(QFont("Segoe UI", 9))
+            painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, "—")
+            painter.restore()
+            return
 
         rect = option.rect
         px = rect.x() + 4
@@ -85,16 +84,16 @@ class TimelineVoicePillDelegate(QStyledItemDelegate):
 
         actor = sub_info.get("actor", "")
         gender = sub_info.get("gender", "")
-        has_audio = sub_info.get("has_audio", False)
         rate_val = sub_info.get("rate", "+0%")
         dur_str = sub_info.get("dur_str", "0.0s")
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
         is_female = ("ស្រី" in actor or "Female" in actor or gender == "female" or "Sreymom" in str(sub_info.get("voice", "")))
         is_kid = ("កូនក្មេង" in actor or "Kid" in actor or "Child" in actor)
         is_spk = ("តួអង្គ" in actor or "Speaker" in actor)
 
-        # Palette matching timeline track 3 exactly
+        # Palette matching timeline track 3
         if is_selected:
             bg_col = QColor("#0c3f6e") if not is_female else QColor("#500724")
             border_col = QColor("#facc15")
@@ -141,13 +140,8 @@ class TimelineVoicePillDelegate(QStyledItemDelegate):
                 bx = start_w_x + b_i * wave_step
                 painter.drawLine(bx, center_y - amp, bx, center_y + amp)
 
-        # 3. Signature White Trim Handles [ 0 ] on left and right (matching screenshot)
-        if pw >= 38:
-            self._draw_white_handle(painter, px + 2, py, ph)
-            self._draw_white_handle(painter, px + pw - 12, py, ph)
-
-        # 4. Pill Text Badge
-        aud_ico = "🔊" if has_audio else "🎙️"
+        # 3. Pill Text Badge (Clean, modern badge without bulky [0] handles)
+        aud_ico = "🔊"
         disp_name = actor
         if not disp_name or "Dialogue" in disp_name:
             v_name = sub_info.get("voice", "")
@@ -167,7 +161,7 @@ class TimelineVoicePillDelegate(QStyledItemDelegate):
         badge_txt = f"{aud_ico} [{disp_name}] {dur_str} ({rate_val})"
         painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         fm = painter.fontMetrics()
-        tbw = min(pw - 26, fm.horizontalAdvance(badge_txt) + 12)
+        tbw = min(pw - 8, fm.horizontalAdvance(badge_txt) + 12)
         tbx = px + (pw - tbw) // 2
         tby = py + 2
         tbh = max(8, ph - 4)
@@ -184,19 +178,8 @@ class TimelineVoicePillDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _draw_white_handle(self, painter: QPainter, x: int, y: int, h: int):
-        """Draws the signature white rounded pill handle [ 0 ] matching timeline clips"""
-        w = 10
-        handle_h = min(18, max(12, h - 6))
-        hy = y + (h - handle_h) // 2
-        painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.drawRoundedRect(x, hy, w, handle_h, 3, 3)
-        painter.setPen(QPen(QColor("#0f172a"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        slit_h = max(5, handle_h - 7)
-        slit_y = hy + (handle_h - slit_h) // 2
-        painter.drawLine(x + w // 2, slit_y, x + w // 2, slit_y + slit_h)
-        painter.restore()
+        """No-op: removed bulky [0] pill handles for clean modern look."""
+        pass
 
 
 class SubtitlesView(QWidget):
@@ -207,6 +190,8 @@ class SubtitlesView(QWidget):
     - Integrated AI translation and multi-model Dubbing controllers
     - Precise millisecond timing controls
     """
+    subtitle_dropped = Signal(str)
+
     def __init__(
         self,
         parent=None,
@@ -233,7 +218,8 @@ class SubtitlesView(QWidget):
         on_fix_overlaps=None,
         on_select_multiple_subs=None,
         on_stop_task=None,
-        on_detect_genders=None
+        on_detect_genders=None,
+        on_clear_subtitles=None
     ):
         super().__init__(parent)
         self.on_select_sub = on_select_sub
@@ -260,6 +246,7 @@ class SubtitlesView(QWidget):
         self.on_fix_overlaps = on_fix_overlaps
         self.on_stop_task = on_stop_task
         self.on_detect_genders = on_detect_genders
+        self.on_clear_subtitles = on_clear_subtitles
 
         self._subtitles_data = []
         self._selected_idx = -1
@@ -268,27 +255,64 @@ class SubtitlesView(QWidget):
         self._idx_to_row = {}
         self._current_voice = VOICE_MODEL_OPTIONS[0]
         self._auto_dub = True
+        self.current_filename = ""
+
+        # Drag & Drop Animation and Ripple State
+        self.setAcceptDrops(True)
+        self._is_drag_hovering = False
+        self._drag_pulse_phase = 0.0
+        self._drag_pulse_timer = QTimer(self)
+        self._drag_pulse_timer.setInterval(25)
+        self._drag_pulse_timer.timeout.connect(self._on_sub_drag_pulse_tick)
+
+        self._drop_ripple_pos = None
+        self._drop_ripple_radius = 0.0
+        self._drop_ripple_opacity = 0.0
+        self._drop_ripple_timer = QTimer(self)
+        self._drop_ripple_timer.setInterval(16)
+        self._drop_ripple_timer.timeout.connect(self._on_sub_drop_ripple_tick)
 
         self._init_ui()
 
+    def _on_sub_drag_pulse_tick(self):
+        self._drag_pulse_phase = (self._drag_pulse_phase + 0.10) % (2.0 * math.pi)
+        self.update()
+
+    def _on_sub_drop_ripple_tick(self):
+        self._drop_ripple_radius += 16.0
+        self._drop_ripple_opacity -= 0.045
+        if self._drop_ripple_opacity <= 0.0:
+            self._drop_ripple_opacity = 0.0
+            self._drop_ripple_pos = None
+            self._drop_ripple_timer.stop()
+        self.update()
+
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # ---------------- TOP ACTION BAR: AI TRANSLATION & DUBBING ----------------
+        # ---------------- TOP ACTION BAR: AI TRANSLATION & DUBBING (Flush & Seamless) ----------------
         top_bar = QFrame()
+        top_bar.setObjectName("sub_top_bar")
         top_bar.setStyleSheet("""
-            QFrame {
-                background-color: #171b24;
-                border: 1px solid #232b38;
-                border-radius: 6px;
+            QFrame#sub_top_bar {
+                background-color: #12151e;
+                border: none;
+                border-bottom: 1px solid #1c2230;
                 padding: 2px 4px;
+            }
+            QFrame#sub_top_bar QPushButton {
+                padding: 4px 6px;
+                font-size: 11px;
+                font-weight: 600;
+                min-width: 0px;
+                border-radius: 5px;
             }
         """)
         r1_layout = QHBoxLayout(top_bar)
-        r1_layout.setContentsMargins(6, 4, 6, 4)
-        r1_layout.setSpacing(6)
+        r1_layout.setContentsMargins(4, 3, 4, 3)
+        r1_layout.setSpacing(5)
 
         # Provider & style selectors are preserved internally with Google Free as default
         self.combo_provider = QComboBox()
@@ -302,25 +326,29 @@ class SubtitlesView(QWidget):
         self.combo_style.addItems(TRANSLATION_STYLES)
         self.combo_style.setVisible(False)
 
-        btn_import = QPushButton(" SRT file")
+        btn_import = QPushButton(" SRT")
+        btn_import.setToolTip("Import SRT File (នាំចូលឯកសារ SRT)")
         btn_import.setIcon(get_folder_icon(14, color="#38bdf8"))
         btn_import.clicked.connect(self._on_import_srt_clicked)
         r1_layout.addWidget(btn_import)
 
-        btn_cc = QPushButton(" ចាប់ CC")
+        btn_cc = QPushButton(" ចាប់ដោយ AI")
         btn_cc.setObjectName("btn_primary")
+        btn_cc.setToolTip("AI Auto Speech-to-Text / Captions (ចាប់អក្សររត់ស្វ័យប្រវត្តិដោយ AI)")
         btn_cc.setIcon(get_mic_icon(14, color="#ffffff"))
         btn_cc.clicked.connect(self._on_capture_cc_clicked)
         r1_layout.addWidget(btn_cc)
 
         btn_trans_all = QPushButton(" បកប្រែ")
         btn_trans_all.setObjectName("btn_success")
+        btn_trans_all.setToolTip("Translate All Subtitles (បកប្រែអក្សររត់ទាំងអស់)")
         btn_trans_all.setIcon(get_translate_icon(14, color="#ffffff"))
         btn_trans_all.clicked.connect(self._on_trans_all_clicked)
         r1_layout.addWidget(btn_trans_all)
 
-        btn_dub_all = QPushButton(" បញ្ចូលសំលេង")
+        btn_dub_all = QPushButton(" សំឡេង AI")
         btn_dub_all.setObjectName("btn_primary")
+        btn_dub_all.setToolTip("Generate AI Voice Dubbing (បញ្ចូលសំឡេង AI)")
         btn_dub_all.setIcon(get_dub_icon(14, color="#ffffff"))
         btn_dub_all.clicked.connect(self._on_dub_all_clicked)
         r1_layout.addWidget(btn_dub_all)
@@ -345,103 +373,70 @@ class SubtitlesView(QWidget):
         self.btn_stop_process.setVisible(False)
         r1_layout.addWidget(self.btn_stop_process)
 
-        main_layout.addWidget(top_bar)
-
-        # ---------------- MAIN CONTAINER: SUBTITLES TABLE & SEARCH ----------------
-        table_container = QFrame()
-        table_container.setStyleSheet("""
-            QFrame {
-                background-color: #11141c;
-                border: 1px solid #232b38;
-                border-radius: 6px;
-            }
-        """)
-        tbl_layout = QVBoxLayout(table_container)
-        tbl_layout.setContentsMargins(6, 6, 6, 6)
-        tbl_layout.setSpacing(6)
-
-        # Subtitles Action Toolbar
-        search_layout = QHBoxLayout()
-        search_layout.setSpacing(6)
+        r1_layout.addStretch()
 
         self.lbl_sub_count = QLabel("0 Subtitles")
-        self.lbl_sub_count.setStyleSheet("color: #38bdf8; font-weight: bold;")
-        search_layout.addWidget(self.lbl_sub_count)
-        search_layout.addStretch()
+        self.lbl_sub_count.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
+        r1_layout.addWidget(self.lbl_sub_count)
 
-        btn_listen = QPushButton(" ស្តាប់")
-        btn_listen.setIcon(get_listen_icon(14, color="#38bdf8"))
-        btn_listen.setToolTip("Listen to selected line audio")
-        btn_listen.clicked.connect(self._on_listen_clicked)
-        search_layout.addWidget(btn_listen)
-
-        btn_trans = QPushButton(" បកប្រែ")
-        btn_trans.setIcon(get_translate_icon(14, color="#38bdf8"))
-        btn_trans.setToolTip("Translate selected line")
-        btn_trans.clicked.connect(self._on_trans_single_clicked)
-        search_layout.addWidget(btn_trans)
-
-        btn_add = QPushButton(" add sub")
-        btn_add.setIcon(get_plus_icon(14, color="#10b981"))
-        btn_add.clicked.connect(self._on_add_sub_clicked)
-        search_layout.addWidget(btn_add)
-
-        btn_del = QPushButton(" លុប sub")
-        btn_del.setIcon(get_trash_icon(14, color="#ef4444"))
-        btn_del.clicked.connect(self._on_delete_sub_clicked)
-        search_layout.addWidget(btn_del)
-
-        btn_fit_duration = QPushButton(" តម្រឹមតាមសំឡេង")
-        btn_fit_duration.setIcon(get_clock_icon(14, color="#ffffff"))
-        btn_fit_duration.setToolTip("ពង្រីកពេលវេលា Subtitle ឱ្យត្រូវគ្នានឹងប្រវែងសំឡេងពិតប្រាកដ (Fit Duration to Voice Audio)")
-        btn_fit_duration.setStyleSheet("background-color: #047857; color: #ffffff; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
-        btn_fit_duration.clicked.connect(self._on_fit_duration_clicked)
-        search_layout.addWidget(btn_fit_duration)
-
-        btn_fix_overlaps = QPushButton(" កែជាន់គ្នា")
-        btn_fix_overlaps.setIcon(get_ai_icon(14, color="#ffffff"))
-        btn_fix_overlaps.setToolTip("កែសម្រួលពេលវេលា Subtitles ដែលជាន់គ្នា ឱ្យរត់បន្តគ្នាដោយស្វ័យប្រវត្តិ មិនជាន់សំឡេងគ្នា (Fix Overlapping Subtitles)")
-        btn_fix_overlaps.setStyleSheet("background-color: #0369a1; color: #ffffff; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
-        btn_fix_overlaps.clicked.connect(self._on_fix_overlaps_clicked)
-        search_layout.addWidget(btn_fix_overlaps)
-
-        btn_detect_sex = QPushButton(" 🎭 ចាប់ភេទ (Sex)")
-        btn_detect_sex.setIcon(get_users_icon(14, color="#ffffff"))
-        btn_detect_sex.setToolTip("វិភាគសំឡេងវីដេអូដើម្បីចាប់ភេទតួអង្គ (ប្រុស/ស្រី) និងបែងចែកតួអង្គស្វ័យប្រវត្តិតាមសំឡេងពិត (Detect Character Sex & Diarization from Audio)")
-        btn_detect_sex.setStyleSheet("background-color: #6366f1; color: #ffffff; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
-        btn_detect_sex.clicked.connect(self._on_detect_gender_clicked)
-        search_layout.addWidget(btn_detect_sex)
-
-        self.btn_toggle_inspector = QPushButton(" ⚙️ Inspector")
-        self.btn_toggle_inspector.setIcon(get_speed_icon(14, color="#38bdf8"))
-        self.btn_toggle_inspector.setToolTip("បង្ហាញ / លាក់ ផ្ទាំងខាងស្តាំ (Toggle Right Inspector)")
-        self.btn_toggle_inspector.setStyleSheet("""
-            QPushButton {
-                background-color: #272c36;
-                color: #cbd5e1;
-                border: 1px solid #3e4756;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 4px 10px;
-            }
-            QPushButton:hover {
-                background-color: #3b82f6;
-                color: #ffffff;
-                border-color: #60a5fa;
+        # SRT File Tag Pill (shows filename with [X] button to dismiss/clear)
+        self.tag_srt_file = QFrame()
+        self.tag_srt_file.setObjectName("tag_srt_file")
+        self.tag_srt_file.setStyleSheet("""
+            QFrame#tag_srt_file {
+                background-color: #1e293b;
+                border: 1px solid #0284c7;
+                border-radius: 12px;
+                padding: 1px 4px 1px 8px;
             }
         """)
-        if self.on_toggle_inspector:
-            self.btn_toggle_inspector.clicked.connect(self.on_toggle_inspector)
-        search_layout.addWidget(self.btn_toggle_inspector)
+        tag_layout = QHBoxLayout(self.tag_srt_file)
+        tag_layout.setContentsMargins(0, 0, 0, 0)
+        tag_layout.setSpacing(4)
 
-        tbl_layout.addLayout(search_layout)
+        self.lbl_srt_tag_icon = QLabel("📄")
+        self.lbl_srt_tag_icon.setStyleSheet("font-size: 11px;")
+        tag_layout.addWidget(self.lbl_srt_tag_icon)
 
-        # Virtualized Table with dedicated Sex & Character Columns
+        self.lbl_srt_filename = QLabel("")
+        self.lbl_srt_filename.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px;")
+        tag_layout.addWidget(self.lbl_srt_filename)
+
+        self.btn_clear_srt = QPushButton("✕")
+        self.btn_clear_srt.setToolTip("បោះបង់ឯកសារ SRT នេះ ដើម្បីរើសឯកសារថ្មី (Clear SRT to pick a new one)")
+        self.btn_clear_srt.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_srt.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ef4444;
+                font-weight: bold;
+                font-size: 12px;
+                border: none;
+                padding: 1px 6px;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+            }
+        """)
+        self.btn_clear_srt.clicked.connect(self._on_clear_srt_clicked)
+        tag_layout.addWidget(self.btn_clear_srt)
+
+        self.tag_srt_file.setVisible(False)
+        r1_layout.addWidget(self.tag_srt_file)
+
+        # Fallback attribute for inspector toggle reference
+        self.btn_toggle_inspector = None
+
+        main_layout.addWidget(top_bar)
+
+        # ---------------- MAIN SUBTITLES TABLE (Clean, Borderless, Professional) ----------------
         self.table = QTableWidget()
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "#", "Timing", "Original Text", "Khmer Translation",
-            "ភេទ (Sex)", "តួអង្គ (Character)", "Voice & Speed", "Status"
+            "M/F", "តួអង្គ (Character)", "Voice & Speed", "Status"
         ])
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -451,7 +446,7 @@ class SubtitlesView(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(4, 98)
+        self.table.setColumnWidth(4, 46)
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(5, 138)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
@@ -468,19 +463,262 @@ class SubtitlesView(QWidget):
         self.table.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.setStyleSheet("font-size: 11px;")
-        tbl_layout.addWidget(self.table, 1)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #0b0e15;
+                border: none;
+                gridline-color: #151a24;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #12151e;
+                color: #94a3b8;
+                font-weight: 600;
+                font-size: 11px;
+                border: none;
+                border-bottom: 1px solid #1c2230;
+                border-right: 1px solid #151a24;
+                padding: 4px 6px;
+            }
+            QTableWidget::item:selected {
+                background-color: #1e3a5f;
+                color: #ffffff;
+            }
+        """)
+        self.table.setAcceptDrops(True)
+        self.table.installEventFilter(self)
+        self.table.viewport().installEventFilter(self)
 
-        main_layout.addWidget(table_container, 1)
+        main_layout.addWidget(self.table, 1)
+
+    def eventFilter(self, watched, event):
+        if watched in (self.table, self.table.viewport()):
+            if event.type() == QEvent.Type.DragEnter:
+                self.dragEnterEvent(event)
+                return event.isAccepted()
+            elif event.type() == QEvent.Type.DragMove:
+                self.dragMoveEvent(event)
+                return event.isAccepted()
+            elif event.type() == QEvent.Type.DragLeave:
+                self.dragLeaveEvent(event)
+                return True
+            elif event.type() == QEvent.Type.Drop:
+                self.dropEvent(event)
+                return event.isAccepted()
+        return super().eventFilter(watched, event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                lp = url.toLocalFile().lower()
+                if lp.endswith((".srt", ".vtt", ".ass", ".ssa", ".sub", ".txt")):
+                    self._is_drag_hovering = True
+                    if not self._drag_pulse_timer.isActive():
+                        self._drag_pulse_timer.start()
+                    event.acceptProposedAction()
+                    self.update()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            self._is_drag_hovering = True
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._is_drag_hovering = False
+        self._drag_pulse_timer.stop()
+        self.update()
+
+    def dropEvent(self, event):
+        self._is_drag_hovering = False
+        self._drag_pulse_timer.stop()
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        self._drop_ripple_pos = QPoint(int(pos.x()), int(pos.y()))
+        self._drop_ripple_radius = 16.0
+        self._drop_ripple_opacity = 0.92
+        self._drop_ripple_timer.start()
+
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                fpath = url.toLocalFile()
+                if fpath and fpath.lower().endswith((".srt", ".vtt", ".ass", ".ssa", ".sub", ".txt")):
+                    self.subtitle_dropped.emit(fpath)
+                    if hasattr(self, "on_import_srt") and self.on_import_srt:
+                        self.on_import_srt(fpath)
+                    event.acceptProposedAction()
+                    self.update()
+                    break
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if getattr(self, "_is_drag_hovering", False) or (getattr(self, "_drop_ripple_opacity", 0.0) > 0.0):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if getattr(self, "_is_drag_hovering", False):
+                self._render_srt_drop_overlay(painter)
+            if getattr(self, "_drop_ripple_pos", None) and getattr(self, "_drop_ripple_opacity", 0.0) > 0.0:
+                self._render_srt_drop_ripple(painter)
+            painter.end()
+
+    def _render_srt_drop_overlay(self, painter: QPainter):
+        """Renders animated glassmorphic dropzone over the subtitles view."""
+        rect = self.rect()
+        painter.fillRect(rect, QColor(10, 15, 26, 225))
+
+        phase = getattr(self, "_drag_pulse_phase", 0.0)
+        pulse = (math.sin(phase) + 1.0) / 2.0
+        glow_pen_w = 2.5 + pulse * 1.5
+
+        border_rect = rect.adjusted(12, 12, -12, -12)
+        grad_border = QLinearGradient(border_rect.topLeft(), border_rect.bottomRight())
+        grad_border.setColorAt(0.0, QColor("#38bdf8"))
+        grad_border.setColorAt(0.5, QColor("#818cf8"))
+        grad_border.setColorAt(1.0, QColor("#c084fc"))
+
+        grad_fill = QRadialGradient(border_rect.center(), max(border_rect.width(), border_rect.height()) / 1.5)
+        grad_fill.setColorAt(0.0, QColor(56, 189, 248, int(28 + pulse * 22)))
+        grad_fill.setColorAt(0.6, QColor(99, 102, 241, int(16 + pulse * 12)))
+        grad_fill.setColorAt(1.0, QColor(15, 23, 42, 70))
+
+        painter.setPen(QPen(QBrush(grad_border), glow_pen_w, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(QBrush(grad_fill))
+        painter.drawRoundedRect(border_rect, 14.0, 14.0)
+
+        cx = border_rect.center().x()
+        cy = border_rect.center().y() - 20.0
+
+        # Pulsing Halo
+        halo_r = 44.0 + pulse * 12.0
+        halo_grad = QRadialGradient(QPointF(cx, cy), halo_r)
+        halo_grad.setColorAt(0.0, QColor(56, 189, 248, int(160 * (1.0 - pulse * 0.4))))
+        halo_grad.setColorAt(0.6, QColor(129, 140, 248, int(80 * (1.0 - pulse * 0.4))))
+        halo_grad.setColorAt(1.0, QColor(129, 140, 248, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(halo_grad))
+        painter.drawEllipse(QPointF(cx, cy), halo_r, halo_r)
+
+        # Center circular badge
+        badge_r = 32.0
+        badge_grad = QLinearGradient(cx - badge_r, cy - badge_r, cx + badge_r, cy + badge_r)
+        badge_grad.setColorAt(0.0, QColor("#0284c7"))
+        badge_grad.setColorAt(0.5, QColor("#38bdf8"))
+        badge_grad.setColorAt(1.0, QColor("#818cf8"))
+        painter.setPen(QPen(QColor("#ffffff"), 2.0))
+        painter.setBrush(QBrush(badge_grad))
+        painter.drawEllipse(QPointF(cx, cy), badge_r, badge_r)
+
+        # Speech bubble icon with [CC]
+        bubble_w = 28.0
+        bubble_h = 18.0
+        bubble_x = cx - 14.0
+        bubble_y = cy - 10.0
+        b_path = QPainterPath()
+        b_path.addRoundedRect(QRectF(bubble_x, bubble_y, bubble_w, bubble_h), 4.0, 4.0)
+        b_path.moveTo(bubble_x + 5.0, bubble_y + bubble_h)
+        b_path.lineTo(bubble_x + 2.0, bubble_y + bubble_h + 4.0)
+        b_path.lineTo(bubble_x + 9.0, bubble_y + bubble_h)
+        b_path.closeSubpath()
+        painter.setPen(QPen(QColor("#ffffff"), 1.8))
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawPath(b_path)
+
+        painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        painter.setPen(QColor("#0284c7"))
+        painter.drawText(QRectF(bubble_x, bubble_y, bubble_w, bubble_h), Qt.AlignmentFlag.AlignCenter, "CC")
+
+        # Titles
+        painter.setFont(QFont("Kantumruy Pro", 14, QFont.Weight.Bold))
+        painter.setPen(QColor(0, 0, 0, 200))
+        painter.drawText(QRectF(border_rect.left(), cy + badge_r + 15, border_rect.width(), 30),
+                         Qt.AlignmentFlag.AlignCenter, "📥 Drop Subtitle (SRT) Here (ទម្លាក់ឯកសារ SRT ទីនេះ)")
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(QRectF(border_rect.left(), cy + badge_r + 14, border_rect.width(), 30),
+                         Qt.AlignmentFlag.AlignCenter, "📥 Drop Subtitle (SRT) Here (ទម្លាក់ឯកសារ SRT ទីនេះ)")
+
+        # Feature pill
+        pill_w = min(border_rect.width() - 40, 420.0)
+        pill_rect = QRectF(cx - pill_w / 2.0, cy + badge_r + 48, pill_w, 26.0)
+        painter.setPen(QPen(QColor("#38bdf8"), 1.2))
+        painter.setBrush(QColor(15, 23, 42, 230))
+        painter.drawRoundedRect(pill_rect, 13.0, 13.0)
+        painter.setFont(QFont("Kantumruy Pro", 10))
+        painter.setPen(QColor("#38bdf8"))
+        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, "✨ Instant Dialogue Ingestion & AI Translation Ready")
+
+        # Hint
+        painter.setFont(QFont("Segoe UI", 9))
+        painter.setPen(QColor("#94a3b8"))
+        painter.drawText(QRectF(border_rect.left(), pill_rect.bottom() + 6, border_rect.width(), 20),
+                         Qt.AlignmentFlag.AlignCenter, "Supports .SRT • .VTT • .ASS • .SSA • .TXT Dialogue Files")
+
+    def _render_srt_drop_ripple(self, painter: QPainter):
+        """Renders smooth expanding glowing ripple wave upon drop."""
+        pos = getattr(self, "_drop_ripple_pos", None)
+        opacity = getattr(self, "_drop_ripple_opacity", 0.0)
+        r = getattr(self, "_drop_ripple_radius", 0.0)
+        if not pos or opacity <= 0.0 or r <= 0.0:
+            return
+
+        alpha_outer = int(max(0.0, min(1.0, opacity)) * 255)
+        outer_pen = QPen(QColor(56, 189, 248, alpha_outer), 3.0)
+        painter.setPen(outer_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(pos, r, r)
+
+        if r > 18.0:
+            alpha_inner = int(max(0.0, min(1.0, opacity)) * 180)
+            inner_pen = QPen(QColor(129, 140, 248, alpha_inner), 2.0)
+            painter.setPen(inner_pen)
+            painter.drawEllipse(pos, r * 0.65, r * 0.65)
 
     # ------------------ DATA BINDING & POPULATION ------------------
-    def set_subtitles(self, subtitles: list):
-        """Populates subtitles list cleanly with virtualized rows"""
+    def set_subtitles(self, subtitles: list, filename: str = None):
+        """Populates subtitles list cleanly with virtualized rows and updates file tag."""
         self._subtitles_data = subtitles or []
+        if filename:
+            self.current_filename = filename
+            disp = filename if len(filename) <= 32 else (filename[:29] + "...")
+            self.lbl_srt_filename.setText(disp)
+            self.lbl_srt_filename.setToolTip(f"ឯកសារ SRT: {filename}\n(ចុច ✕ ដើម្បីបោះបង់ និងរើសឯកសារថ្មី)")
+            self.tag_srt_file.setVisible(bool(self._subtitles_data))
+        elif not self._subtitles_data:
+            self.tag_srt_file.setVisible(False)
+            self.current_filename = ""
+        elif self.current_filename and self._subtitles_data:
+            self.tag_srt_file.setVisible(True)
         self._refresh_table()
 
-    def update_subtitles(self, subtitles: list):
-        self.set_subtitles(subtitles)
+    def clear_subtitles(self):
+        """Clears all subtitle data, resets table, and hides SRT file tag."""
+        self._subtitles_data = []
+        self.current_filename = ""
+        self.tag_srt_file.setVisible(False)
+        self.lbl_srt_filename.setText("")
+        self._refresh_table()
+
+    def _on_clear_srt_clicked(self):
+        """Clears the loaded SRT file so the user can easily pick a new one."""
+        fn_disp = f" '{self.current_filename}'" if self.current_filename else ""
+        reply = QMessageBox.question(
+            self,
+            "Clear Subtitles / បោះបង់ Subtitle",
+            f"តើអ្នកចង់បោះបង់ឯកសារ SRT{fn_disp} ដើម្បីរើសឯកសារថ្មីមែនទេ?\n(Do you want to clear current subtitles to choose a new file?)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.clear_subtitles()
+            if self.on_clear_subtitles:
+                self.on_clear_subtitles()
+            # Automatically open file picker dialog to let user choose a new SRT file
+            if self.on_import_srt:
+                self.on_import_srt()
+
+    def update_subtitles(self, subtitles: list, filename: str = None):
+        self.set_subtitles(subtitles, filename=filename)
 
     def _on_table_cell_clicked(self, row: int, col: int):
         it = self.table.item(row, 0)
@@ -508,7 +746,10 @@ class SubtitlesView(QWidget):
         if orig_idx is None or not (0 <= orig_idx < len(self._subtitles_data)):
             return
 
-        if col == 4:
+        if col == 1:
+            # Double click on Timing: Edit line timing
+            self._prompt_custom_timing(orig_idx)
+        elif col == 4:
             # Double click on Sex: Quick toggle Male <-> Female
             self._toggle_line_gender(orig_idx)
         elif col == 5:
@@ -575,10 +816,24 @@ class SubtitlesView(QWidget):
                 end_val = float(sub.get("end", 0.0))
                 start_str = format_timestamp(start_val)
                 end_str = format_timestamp(end_val)
-                timing = f"{start_str} -> {end_str}"
+                timing = format_compact_timing_range(start_val, end_val)
+                full_timing = f"{start_str} -> {end_str}"
                 orig_text = str(sub.get("orig_text", "") or sub.get("text", ""))
                 km_text = str(sub.get("khmer_text", ""))
-                has_audio = bool(sub.get("audio_file") or sub.get("audio_path"))
+
+                # Check if voice audio actually exists
+                audio_target = sub.get("audio_file") or sub.get("audio_path")
+                has_audio = False
+                if audio_target and isinstance(audio_target, str):
+                    try:
+                        import os
+                        if os.path.isfile(audio_target) and os.path.getsize(audio_target) > 0:
+                            has_audio = True
+                    except Exception:
+                        pass
+                if not has_audio and (sub.get("status") == "dubbed" or sub.get("has_audio") is True) and audio_target:
+                    has_audio = True
+
                 rate_val = str(sub.get("rate") or "+0%")
                 if not rate_val.startswith(("+", "-")):
                     rate_val = f"+{rate_val}"
@@ -587,7 +842,7 @@ class SubtitlesView(QWidget):
 
                 # Compute voice duration (actual audio_dur if available, else cue timing duration)
                 dur = max(0.0, end_val - start_val)
-                if sub.get("audio_dur"):
+                if has_audio and sub.get("audio_dur"):
                     try:
                         dur = float(sub["audio_dur"])
                     except Exception:
@@ -610,25 +865,28 @@ class SubtitlesView(QWidget):
                 it_idx.setFlags(it_idx.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
                 it_time = QTableWidgetItem(timing)
+                it_time.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_time.setToolTip(f"⏱️ Exact Timing:\n  {full_timing}\n  Duration: {dur_str}\n(Double-click to edit)")
+                it_time.setFlags(it_time.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 it_orig = QTableWidgetItem(orig_text)
                 it_km = QTableWidgetItem(km_text)
                 if is_translating:
                     it_km.setForeground(QColor("#f59e0b"))
 
-                # Column 4: Sex (ភេទ: 👨 ប្រុស / 👩 ស្រី / 🧒 ក្មេង)
+                # Column 4: M / F (Gender)
                 actor_name, char_icon, char_color = self._get_sub_character_info(sub)
                 g_raw = str(sub.get("gender", "")).lower()
                 is_female = (g_raw == "female") or ("ស្រី" in actor_name or "Female" in actor_name) or ("Sreymom" in str(sub.get("voice", "") or sub.get("voice_name", "")))
                 is_kid = "កូនក្មេង" in actor_name or "kid" in g_raw
 
                 if is_female:
-                    sex_label = "👩 ស្រី"
+                    sex_label = "F"
                     sex_color = QColor("#f472b6")
                 elif is_kid:
-                    sex_label = "🧒 ក្មេង"
+                    sex_label = "K"
                     sex_color = QColor("#f59e0b")
                 else:
-                    sex_label = "👨 ប្រុស"
+                    sex_label = "M"
                     sex_color = QColor("#38bdf8")
 
                 it_sex = QTableWidgetItem(sex_label)
@@ -637,7 +895,7 @@ class SubtitlesView(QWidget):
                 it_sex.setFlags(it_sex.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 it_sex.setForeground(sex_color)
                 it_sex.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-                it_sex.setToolTip("ភេទ (Sex):\n• ចុច ១ ដង: ប្តូរ 👨 ប្រុស <-> 👩 ស្រី")
+                it_sex.setToolTip("Gender (ភេទ):\n• M = ប្រុស (Male)\n• F = ស្រី (Female)\n• ចុច ១ ដង: ប្តូរ M <-> F")
 
                 # Column 5: Character (តួអង្គ)
                 it_char = QTableWidgetItem(actor_name)
@@ -658,7 +916,16 @@ class SubtitlesView(QWidget):
                     "rate": rate_val,
                     "dur_str": dur_str
                 }
-                it_voice = QTableWidgetItem(f"{dur_str}  [{rate_val}]")
+                if has_audio:
+                    it_voice = QTableWidgetItem(f"{dur_str}  [{rate_val}]")
+                    it_voice.setToolTip(f"🔊 Voice Audio: {dur_str} ({rate_val})\n• Single-click: Play voice\n• Double-click: Change voice speed")
+                else:
+                    it_voice = QTableWidgetItem("—")
+                    it_voice.setToolTip("🎙️ No Voice Audio yet\n• Generate dubbing or click listen to create voice\n• Double-click: Set voice speed")
+                it_voice.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_voice.setData(Qt.ItemDataRole.UserRole, orig_idx)
+                it_voice.setData(Qt.ItemDataRole.UserRole + 1, sub_info)
+                it_voice.setFlags(it_voice.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 it_voice.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 it_voice.setData(Qt.ItemDataRole.UserRole, orig_idx)
                 it_voice.setData(Qt.ItemDataRole.UserRole + 1, sub_info)
@@ -794,14 +1061,14 @@ class SubtitlesView(QWidget):
         sub = self._subtitles_data[orig_idx]
         actor_name, char_icon, char_color = self._get_sub_character_info(sub)
 
-        # Col 4: Sex (ភេទ)
+        # Col 4: Gender / M / F
         it_sex = self.table.item(row, 4)
         if it_sex:
             if is_female:
-                it_sex.setText("👩 ស្រី")
+                it_sex.setText("F")
                 it_sex.setForeground(QColor("#f472b6"))
             else:
-                it_sex.setText("👨 ប្រុស")
+                it_sex.setText("M")
                 it_sex.setForeground(QColor("#38bdf8"))
 
         # Col 5: Character (តួអង្គ)
@@ -838,7 +1105,12 @@ class SubtitlesView(QWidget):
                 "rate": rate_val,
                 "dur_str": dur_str
             }
-            it_voice.setText(f"{dur_str}  [{rate_val}]")
+            if has_audio:
+                it_voice.setText(f"{dur_str}  [{rate_val}]")
+                it_voice.setToolTip(f"🔊 Voice Audio: {dur_str} ({rate_val})\n• Single-click: Play voice\n• Double-click: Change voice speed")
+            else:
+                it_voice.setText("—")
+                it_voice.setToolTip("🎙️ No Voice Audio yet\n• Generate dubbing or click listen to create voice\n• Double-click: Set voice speed")
             it_voice.setData(Qt.ItemDataRole.UserRole + 1, sub_info)
 
         it_status = self.table.item(row, 7)
@@ -1617,17 +1889,17 @@ class SubtitlesView(QWidget):
         if not (0 <= idx < len(self._subtitles_data)):
             return
         sub = self._subtitles_data[idx]
-        st_str = format_timestamp(sub.get("start", 0.0))
-        en_str = format_timestamp(sub.get("end", 0.0))
-        curr_val = f"{st_str} -> {en_str}"
+        st = float(sub.get("start", 0.0))
+        en = float(sub.get("end", 0.0))
+        curr_val = format_compact_timing_range(st, en)
         val, ok = QInputDialog.getText(
             self,
-            "Edit Subtitle Timing",
-            f"Enter timing for Line #{idx+1} (Format: 00:00:02,200 -> 00:00:04,400):",
+            "Edit Subtitle Timing (កែសម្រួលពេលវេលា)",
+            f"Enter timing for Line #{idx+1} (Format: 00:00 -> 00:07 or 00:00:02,200 -> 00:00:04,400):",
             text=curr_val
         )
-        if ok and "->" in val:
-            parts = val.split("->")
+        if ok and ("->" in val or "-" in val):
+            parts = val.split("->") if "->" in val else val.split("-")
             try:
                 s = parse_timestamp_to_seconds(parts[0].strip())
                 e = parse_timestamp_to_seconds(parts[1].strip())
@@ -1719,18 +1991,44 @@ class SubtitlesView(QWidget):
                 color: #ffffff;
             }
         """)
-        act_whisperx = menu.addAction("🎯 WhisperX (AI Diarization - បំបែកសំឡេងតួអង្គ A/B + Word Timestamps)")
-        act_whisperx.triggered.connect(lambda: self.on_capture_cc("whisperx") if self.on_capture_cc else None)
-        act_whisper = menu.addAction("⚡ Faster-Whisper (Multi-Language / ភាសាចម្រុះ)")
-        act_whisper.triggered.connect(lambda: self.on_capture_cc("whisper") if self.on_capture_cc else None)
-        act_funasr = menu.addAction("🇨🇳 SenseVoice-Small + CAM++ (Alibaba - ASR + Emotion SER + Events + Diarization)")
+        act_auto = menu.addAction("🤖 ចាប់ស្វ័យប្រវត្តិដោយ AI  ⚡ [Auto Detect & Best Engine]")
+        act_auto.triggered.connect(lambda: self.on_capture_cc("auto") if self.on_capture_cc else None)
+
+        menu.addSeparator()
+        # Option 1: SenseVoice-Small Only (No CAM++ / Pure ASR)
+        act_sv_only = menu.addAction("🇨🇳 SenseVoice-Small (ASR Only)  ⚡ [ល្បឿនលឿនបំផុត 25x | Emotion SER | មិនបំបែកតួអង្គ]")
+        act_sv_only.triggered.connect(lambda: self.on_capture_cc("sensevoice_only") if self.on_capture_cc else None)
+
+        # Option 2: SenseVoice-Small + CAM++ Diarization
+        act_funasr = menu.addAction("🇨🇳 SenseVoice-Small + CAM++  🏆 [ស្ដេចរឿងចិន 99.2% | បំបែកតួអង្គ A/B | Emotion SER]")
         act_funasr.triggered.connect(lambda: self.on_capture_cc("funasr") if self.on_capture_cc else None)
+
+        act_whisperx = menu.addAction("🎯 WhisperX (AI Diarization)  ⭐ [បំបែកតួអង្គ A/B 98.5% | Word Align | អង់គ្លេស/ទូទៅ]")
+        act_whisperx.triggered.connect(lambda: self.on_capture_cc("whisperx") if self.on_capture_cc else None)
+
+        act_whisper = menu.addAction("⚡ Faster-Whisper  ⚡ [លឿន 10x | 99+ ភាសាចម្រុះ | ស្រាលម៉ាស៊ីន CPU/GPU]")
+        act_whisper.triggered.connect(lambda: self.on_capture_cc("whisper") if self.on_capture_cc else None)
+
+        menu.addSeparator()
+        act_bench = menu.addAction("📊 តារាងប្រៀបធៀប & តាមដានគុណភាព AI Models (Benchmark Tracker)...")
+        act_bench.triggered.connect(self._open_cc_benchmark_dialog)
+
         btn = self.sender()
         if btn and hasattr(btn, "mapToGlobal"):
             pos = btn.mapToGlobal(QPoint(0, btn.height()))
         else:
             pos = QCursor.pos()
         menu.exec(pos)
+
+    def _open_cc_benchmark_dialog(self):
+        from ui_v_PyQt6.components.subtitles.cc_model_benchmark_dialog import CCModelBenchmarkDialog
+        hist = getattr(self.window(), "_cc_benchmark_history", []) if hasattr(self, "window") and self.window() else []
+        dlg = CCModelBenchmarkDialog(
+            run_history=hist,
+            on_select_model=lambda key: self.on_capture_cc(key) if self.on_capture_cc else None,
+            parent=self
+        )
+        dlg.exec()
 
     def _on_trans_all_clicked(self):
         if self.on_translate_all:
